@@ -4,8 +4,8 @@ VEX Dual-Division Kiosk (HS + MS) for Raspberry Pi
 ===================================================
 Single file. Python 3.8+ standard library only (no pip installs).
 
-Run:      python3 vex_kiosk.py                (serves on port 5000)
-          sudo python3 vex_kiosk.py --port 80 (serves on port 80)
+Run:      python3 Vex_Event_Display.py                (serves on port 5000)
+          sudo python3 Vex_Event_Display.py --port 80 (serves on port 80)
 Kiosk:    http://<pi-ip>:5000/
 Admin:    http://<pi-ip>:5000/admin
 
@@ -38,8 +38,8 @@ DEFAULT_ENDPOINTS = "\n".join([
 ])
 
 DEFAULT_CONFIG = {
-    "hs": {"sku": "", "demo": True, "phase": "auto"},
-    "ms": {"sku": "", "demo": True, "phase": "auto"},
+    "hs": {"sku": "", "demo": True, "phase": "auto", "fields": 2},
+    "ms": {"sku": "", "demo": True, "phase": "auto", "fields": 2},
     "rankWait": 300,   # seconds to wait after the last qual is scored before showing rankings only
     "poll": 15,
     "scroll": 8,
@@ -90,6 +90,7 @@ def sanitize_config(c):
         src = c.get(d, {}) if isinstance(c.get(d), dict) else {}
         out[d]["sku"] = str(src.get("sku", "")).strip()[:500]
         out[d]["demo"] = bool(src.get("demo", False))
+        out[d]["fields"] = clamp(src.get("fields"), 1, 4, 2)
         ph = str(src.get("phase", "auto"))
         out[d]["phase"] = ph if ph in ("auto", "quals", "rankings", "bracket") else "auto"
     out["rankWait"] = clamp(c.get("rankWait"), 0, 3600, 300)
@@ -822,6 +823,19 @@ td:nth-child(2){font-weight:800}
 td.rk{color:var(--gold);font-weight:800}
 tr.top3 td:nth-child(2){color:var(--gold)}
 td.avg{color:var(--green)}
+.sec.last{margin-bottom:.2rem}
+.queue-title{color:var(--gold)}
+.card.queuing{border-color:var(--gold);background:#2a2208;box-shadow:inset 0 0 0 .1rem var(--gold),0 0 1rem rgba(255,200,61,.35)}
+.flash{animation:flash 1s linear infinite}
+@keyframes flash{0%,49%{opacity:1}50%,100%{opacity:.1}}
+@keyframes softpulse{0%,100%{opacity:1}50%{opacity:.45}}
+@media (prefers-reduced-motion:reduce){.flash{animation:softpulse 2s ease-in-out infinite}}
+.matches.dense{gap:.35rem}
+.matches.dense .card{padding:.15rem .6rem;gap:.1rem}
+.matches.dense .qbadge{font-size:1.15rem}
+.matches.dense .row1{font-size:1.1rem}
+.matches.dense .alli{font-size:1.4rem}
+.matches.dense .alli .score{font-size:1.8rem}
 /* phases: quals (default) | rankings (rankings only) | bracket */
 .bracket{display:none;min-height:0;min-width:0;padding:.7rem .8rem;grid-template-columns:repeat(6,1fr);grid-template-rows:auto repeat(8,minmax(0,1fr));column-gap:0;row-gap:.3rem}
 .pane.ph-bracket .bracket{display:grid}
@@ -892,8 +906,9 @@ function buildPane(div){
     '<div class="phead"><div class="badge" id="b-'+div+'"></div><div class="api" id="a-'+div+'"></div></div>'+
     '<div class="pbody">'+
       '<div class="matches">'+
-        '<div class="sec last"><div class="sec-title">LAST 2 SCORED</div><div id="last-'+div+'" class="sec"></div></div>'+
-        '<div class="sec next"><div class="sec-title">NEXT 6 ONCOMING</div><div id="next-'+div+'" class="sec next" style="flex:1"></div></div>'+
+        '<div class="sec last"><div id="last-'+div+'" class="sec"></div></div>'+
+        '<div class="sec next"><div class="sec-title">ON FIELD NOW</div><div id="next-'+div+'" class="sec next" style="flex:1"></div></div>'+
+        '<div class="sec next"><div class="sec-title queue-title">NOW QUEUING</div><div id="queue-'+div+'" class="sec next" style="flex:1"></div></div>'+
       '</div>'+
       '<div class="ranks"><div class="rhead"><div class="sec-title" id="rt-'+div+'" style="padding:0">TEAM RANKINGS</div><div class="pageind num" id="pi-'+div+'"></div></div>'+
         '<div class="rwrap" id="rw-'+div+'"></div></div>'+
@@ -902,7 +917,7 @@ function buildPane(div){
 }
 
 /* ---------- renderers ---------- */
-function teamsHtml(a){ return a.map(t=>'<span>'+esc(t)+'</span>').join(''); }
+function teamsHtml(a, cls){ return a.map(t=>'<span'+(cls?' class="'+cls+'"':'')+'>'+esc(t)+'</span>').join(''); }
 
 function lastCard(m){
   const rw = m.rs>m.bs, bw = m.bs>m.rs;
@@ -911,9 +926,10 @@ function lastCard(m){
     '<div class="row2"><div class="alli red'+(bw?' lose':'')+'"><span class="teams">'+teamsHtml(m.red)+'</span><span class="score num">'+m.rs+'</span></div>'+
     '<div class="alli blue'+(rw?' lose':'')+'"><span class="teams">'+teamsHtml(m.blue)+'</span><span class="score num">'+m.bs+'</span></div></div></div>';
 }
-function nextCard(m, first){
-  return '<div class="card'+(first?' upnext':'')+'"><div class="row1"><span class="qbadge num">Q '+m.num+'</span>'+(m.field?'<span class="field">Field: '+esc(m.field)+'</span>':'')+(first?'<span class="nextflag">NEXT</span>':'')+'</div>'+
-    '<div class="row2"><div class="alli red"><span class="teams">'+teamsHtml(m.red)+'</span></div><div class="alli blue"><span class="teams">'+teamsHtml(m.blue)+'</span></div></div></div>';
+function nextCard(m, queuing){
+  const c = queuing ? 'flash' : '';
+  return '<div class="card'+(queuing?' queuing':'')+'"><div class="row1"><span class="qbadge num">Q '+m.num+'</span>'+(m.field?'<span class="field">Field: '+esc(m.field)+'</span>':'')+'</div>'+
+    '<div class="row2"><div class="alli red"><span class="teams">'+teamsHtml(m.red,c)+'</span></div><div class="alli blue"><span class="teams">'+teamsHtml(m.blue,c)+'</span></div></div></div>';
 }
 
 function pageSize(div){
@@ -936,12 +952,16 @@ function renderStatus(div){
 
 function renderMatches(div){
   const d = S[div].data;
-  const last = document.getElementById('last-'+div), nxt = document.getElementById('next-'+div);
-  if (!d){ last.innerHTML = '<div class="empty">Waiting for data…</div>'; nxt.innerHTML=''; return; }
+  const last = document.getElementById('last-'+div), nxt = document.getElementById('next-'+div), que = document.getElementById('queue-'+div);
+  if (!d){ last.innerHTML = '<div class="empty">Waiting for data…</div>'; nxt.innerHTML=''; que.innerHTML=''; return; }
+  const n = Math.max(1, Math.min(4, +(cfg[div] && cfg[div].fields) || 2));   /* number of fields */
+  last.closest('.matches').classList.toggle('dense', n >= 3);
   const scored = d.matches.filter(m=>m.scored).slice(-2).reverse();
-  const upcoming = d.matches.filter(m=>!m.scored).slice(0,6);
+  const upcoming = d.matches.filter(m=>!m.scored);
+  const onField = upcoming.slice(0, n), queuing = upcoming.slice(n, 2*n);
   last.innerHTML = scored.length ? scored.map(lastCard).join('') : '<div class="empty">No matches scored yet</div>';
-  nxt.innerHTML = upcoming.length ? upcoming.map((m,i)=>nextCard(m,i===0)).join('') : '<div class="empty">No upcoming matches</div>';
+  nxt.innerHTML = onField.length ? onField.map(m=>nextCard(m,false)).join('') : '<div class="empty">No matches on the fields</div>';
+  que.innerHTML = queuing.length ? queuing.map(m=>nextCard(m,true)).join('') : '<div class="empty">No matches queuing</div>';
 }
 
 function renderRanks(div){
@@ -1134,6 +1154,7 @@ ADMIN_HTML = r"""<!DOCTYPE html>
       <h2 class="font-bold text-lg">High School event</h2>
       <div><label for="hs-sku">Event SKU or events.vex.com URL</label><input type="text" id="hs-sku" placeholder="RE-V5RC-XX-XXXX"></div>
       <label class="flex items-center gap-2" style="color:#eef3f9"><input type="checkbox" id="hs-demo"> Use demo data (no internet needed)</label>
+      <div><label for="hs-fields">Number of fields (1-4): matches on the fields now / queuing</label><input type="number" id="hs-fields" min="1" max="4"></div>
       <div><label for="hs-phase">Display mode</label><select id="hs-phase"><option value="auto">Automatic (quals, then rankings, then bracket)</option><option value="quals">Always show qualification matches</option><option value="rankings">Always show rankings only</option><option value="bracket">Always show bracket</option></select></div>
       <div class="flex gap-2"><button class="btn" data-test="hs"><span data-i="activity"></span>Test HS connection</button></div>
     </div>
@@ -1141,6 +1162,7 @@ ADMIN_HTML = r"""<!DOCTYPE html>
       <h2 class="font-bold text-lg">Middle School event</h2>
       <div><label for="ms-sku">Event SKU or events.vex.com URL</label><input type="text" id="ms-sku" placeholder="RE-V5RC-XX-XXXX"></div>
       <label class="flex items-center gap-2" style="color:#eef3f9"><input type="checkbox" id="ms-demo"> Use demo data (no internet needed)</label>
+      <div><label for="ms-fields">Number of fields (1-4): matches on the fields now / queuing</label><input type="number" id="ms-fields" min="1" max="4"></div>
       <div><label for="ms-phase">Display mode</label><select id="ms-phase"><option value="auto">Automatic (quals, then rankings, then bracket)</option><option value="quals">Always show qualification matches</option><option value="rankings">Always show rankings only</option><option value="bracket">Always show bracket</option></select></div>
       <div class="flex gap-2"><button class="btn" data-test="ms"><span data-i="activity"></span>Test MS connection</button></div>
     </div>
@@ -1197,15 +1219,15 @@ function toast(msg, ok){
   clearTimeout(toast.t); toast.t = setTimeout(()=>t.classList.add('hidden'), 4000);
 }
 function fill(){
-  $('hs-sku').value = cfg.hs.sku; $('hs-demo').checked = !!cfg.hs.demo; $('hs-phase').value = cfg.hs.phase || 'auto';
-  $('ms-sku').value = cfg.ms.sku; $('ms-demo').checked = !!cfg.ms.demo; $('ms-phase').value = cfg.ms.phase || 'auto';
+  $('hs-sku').value = cfg.hs.sku; $('hs-demo').checked = !!cfg.hs.demo; $('hs-phase').value = cfg.hs.phase || 'auto'; $('hs-fields').value = cfg.hs.fields || 2;
+  $('ms-sku').value = cfg.ms.sku; $('ms-demo').checked = !!cfg.ms.demo; $('ms-phase').value = cfg.ms.phase || 'auto'; $('ms-fields').value = cfg.ms.fields || 2;
   $('rankWait').value = cfg.rankWait == null ? 300 : cfg.rankWait;
   $('poll').value = cfg.poll; $('scroll').value = cfg.scroll; $('endpoints').value = cfg.endpoints || '';
 }
 function read(){
   return {
-    hs:{sku:$('hs-sku').value.trim(), demo:$('hs-demo').checked, phase:$('hs-phase').value},
-    ms:{sku:$('ms-sku').value.trim(), demo:$('ms-demo').checked, phase:$('ms-phase').value},
+    hs:{sku:$('hs-sku').value.trim(), demo:$('hs-demo').checked, phase:$('hs-phase').value, fields:+$('hs-fields').value||2},
+    ms:{sku:$('ms-sku').value.trim(), demo:$('ms-demo').checked, phase:$('ms-phase').value, fields:+$('ms-fields').value||2},
     rankWait: $('rankWait').value === '' ? 300 : +$('rankWait').value,
     poll:+$('poll').value||15, scroll:+$('scroll').value||8, endpoints:$('endpoints').value, rev:cfg?cfg.rev:1
   };
