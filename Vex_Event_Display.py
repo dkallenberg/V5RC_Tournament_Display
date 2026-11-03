@@ -766,8 +766,8 @@ body{height:100%;background:var(--bg);color:var(--text);font-family:"Barlow Cond
 .dot{width:1.2rem;height:1.2rem;border-radius:50%;background:var(--green);box-shadow:0 0 .8rem var(--green)}
 .dot.warn{background:var(--amber);box-shadow:0 0 .8rem var(--amber)}
 .dot.off{background:var(--red);box-shadow:0 0 .8rem var(--red)}
-.pbody{flex:1;min-height:0;display:grid;grid-template-columns:44% 56%}
-.matches{display:flex;flex-direction:column;min-height:0;border-right:.14rem solid var(--line);padding:.7rem .8rem;gap:.6rem}
+.pbody{flex:1;min-height:0;display:grid;grid-template-columns:56% 44%}   /* rankings left, matches right */
+.matches{display:flex;flex-direction:column;min-height:0;border-left:.14rem solid var(--line);padding:.7rem .8rem;gap:.6rem}
 .sec-title{font-weight:800;font-size:1.45rem;color:var(--dim);letter-spacing:.08em;padding:0 .2rem .3rem}
 .sec{display:flex;flex-direction:column;gap:.45rem;min-height:0}
 .sec.last{flex:0 0 auto}
@@ -794,7 +794,7 @@ body{height:100%;background:var(--bg);color:var(--text);font-family:"Barlow Cond
 .rwrap{flex:1;min-height:0;overflow:hidden}
 table{width:100%;border-collapse:collapse}
 th{font-size:1.25rem;color:var(--dim);font-weight:800;text-align:right;padding:.3rem .4rem;border-bottom:.12rem solid var(--line);letter-spacing:.05em}
-td{font-size:1.75rem;font-weight:700;text-align:right;padding:0 .4rem;height:3.7rem;border-bottom:.08rem solid #1b2738}
+td{font-size:1.75rem;font-weight:700;text-align:right;padding:0 .4rem;height:calc(var(--rowh,3.7)*1rem);border-bottom:.08rem solid #1b2738}
 th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}
 td:nth-child(2){font-weight:800}
 td.rk{color:var(--gold);font-weight:800}
@@ -813,6 +813,15 @@ td.avg{color:var(--green)}
 .matches.dense .row1{font-size:1.1rem}
 .matches.dense .alli{font-size:1.4rem}
 .matches.dense .alli .score{font-size:1.8rem}
+/* single (full screen): rankings use the left 3/4 as several columns, matches keep the right 1/4 */
+#panes.single .pane:not(.ph-bracket):not(.ph-rankings) .pbody{grid-template-columns:75% 25%}
+#panes.single .pane{--rowh:3.5}
+#panes.single td{font-size:1.4rem;padding:0 .25rem}
+#panes.single th{font-size:1.05rem;padding:.3rem .25rem}
+.rcols{display:grid;gap:1.4rem;height:100%}
+.bl.red.win{background:#ff2d45;color:#fff;box-shadow:0 0 .7rem rgba(255,45,69,.75)}
+.bl.blue.win{background:#2f7bff;color:#fff;box-shadow:0 0 .7rem rgba(47,123,255,.75)}
+.bl.win .sd{color:#fff}
 #panes.single .bl{font-size:1.5rem}
 #panes.single .ctitle{font-size:1.3rem}
 #panes.single .bh{font-size:1.15rem}
@@ -823,7 +832,9 @@ td.avg{color:var(--green)}
 .pane.ph-bracket .matches,.pane.ph-bracket .ranks,.pane.ph-rankings .matches{display:none}
 .pane.ph-bracket .pbody,.pane.ph-rankings .pbody{grid-template-columns:1fr}
 .pane.ph-rankings .ranks{padding:.9rem 2rem}
-.pane.ph-rankings td{font-size:2.4rem;height:4.4rem}
+.pane{--rowh:3.7}
+.pane.ph-rankings{--rowh:4.4}
+.pane.ph-rankings td{font-size:2.4rem}
 .pane.ph-rankings th{font-size:1.5rem}
 .bcell{display:flex;flex-direction:column;justify-content:center;gap:.4rem;min-height:0;min-width:0}
 .ctitle{font-weight:800;font-size:1.05rem;color:var(--dim);letter-spacing:.05em;white-space:nowrap;overflow:hidden}
@@ -887,13 +898,13 @@ function buildPane(div){
   document.getElementById('pane-'+div).innerHTML =
     '<div class="phead"><div class="badge" id="b-'+div+'"></div><div class="api" id="a-'+div+'"></div></div>'+
     '<div class="pbody">'+
+      '<div class="ranks"><div class="rhead"><div class="sec-title" id="rt-'+div+'" style="padding:0">TEAM RANKINGS</div><div class="pageind num" id="pi-'+div+'"></div></div>'+
+        '<div class="rwrap" id="rw-'+div+'"></div></div>'+
       '<div class="matches">'+
         '<div class="sec last"><div id="last-'+div+'" class="sec"></div></div>'+
         '<div class="sec next"><div class="sec-title">ON FIELD NOW</div><div id="next-'+div+'" class="sec next" style="flex:1"></div></div>'+
         '<div class="sec next"><div class="sec-title queue-title">NOW QUEUING</div><div id="queue-'+div+'" class="sec next" style="flex:1"></div></div>'+
       '</div>'+
-      '<div class="ranks"><div class="rhead"><div class="sec-title" id="rt-'+div+'" style="padding:0">TEAM RANKINGS</div><div class="pageind num" id="pi-'+div+'"></div></div>'+
-        '<div class="rwrap" id="rw-'+div+'"></div></div>'+
       '<div class="bracket" id="bk-'+div+'"></div>'+
     '</div>';
 }
@@ -917,8 +928,8 @@ function nextCard(m, queuing){
 function pageSize(div){
   const wrap = document.getElementById('rw-'+div);
   const rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
-  const big = document.getElementById('pane-'+div).classList.contains('ph-rankings');
-  const rowH = (big ? 4.4 : 3.7)*rem + 1.3;           /* td height + border */
+  const rowv = parseFloat(getComputedStyle(document.getElementById('pane-'+div)).getPropertyValue('--rowh')) || 3.7;
+  const rowH = rowv*rem + 1.3;                          /* td height + border */
   const headH = 2.6*rem;
   return Math.max(3, Math.floor((wrap.clientHeight - headH) / rowH));
 }
@@ -946,21 +957,30 @@ function renderMatches(div){
   que.innerHTML = queuing.length ? queuing.map(m=>nextCard(m,true)).join('') : '<div class="empty">No matches queuing</div>';
 }
 
+/* number of ranking columns: 1 in double mode; in single (full screen) 3 beside the matches, 4 when rankings-only */
+function rankCols(div){
+  if (isDouble()) return 1;
+  return document.getElementById('pane-'+div).classList.contains('ph-rankings') ? 4 : 3;
+}
 function renderRanks(div){
   if (!visible(div)) return;
   const d = S[div].data, wrap = document.getElementById('rw-'+div), pi = document.getElementById('pi-'+div);
   if (!d || !d.rankings.length){ wrap.innerHTML='<div class="empty">'+(d? 'No rankings published yet':'Waiting for data…')+'</div>'; pi.textContent=''; return; }
-  const size = pageSize(div), pages = Math.max(1, Math.ceil(d.rankings.length/size)), p = page % pages;
-  const rows = d.rankings.slice(p*size, p*size+size);
+  const K = rankCols(div), size = pageSize(div), per = size*K;
+  const pages = Math.max(1, Math.ceil(d.rankings.length/per)), p = page % pages;
+  const rows = d.rankings.slice(p*per, p*per+per);
   pi.textContent = 'PAGE '+(p+1)+' / '+pages;
-  wrap.innerHTML = '<table><thead><tr><th>#</th><th>TEAM</th><th>W-L-T</th><th>WP</th><th>AP</th><th>SP</th><th>AVG</th></tr></thead><tbody>'+
-    rows.map(r=>'<tr class="'+(r.rank<=3?'top3':'')+' num"><td class="rk">'+r.rank+'</td><td>'+esc(r.team)+'</td><td>'+r.w+'-'+r.l+'-'+r.t+'</td><td>'+r.wp+'</td><td>'+r.ap+'</td><td>'+r.sp+'</td><td class="avg">'+(+r.avg).toFixed(1)+'</td></tr>').join('')+
+  const table = rs => '<table><thead><tr><th>#</th><th>TEAM</th><th>W-L-T</th><th>WP</th><th>AP</th><th>SP</th><th>AVG</th></tr></thead><tbody>'+
+    rs.map(r=>'<tr class="'+(r.rank<=3?'top3':'')+' num"><td class="rk">'+r.rank+'</td><td>'+esc(r.team)+'</td><td>'+r.w+'-'+r.l+'-'+r.t+'</td><td>'+r.wp+'</td><td>'+r.ap+'</td><td>'+r.sp+'</td><td class="avg">'+(+r.avg).toFixed(1)+'</td></tr>').join('')+
     '</tbody></table>';
+  let h = '<div class="rcols" style="grid-template-columns:repeat('+K+',minmax(0,1fr))">';
+  for (let k=0; k<K; k++){ const part = rows.slice(k*size, (k+1)*size); h += '<div>'+(part.length ? table(part) : '')+'</div>'; }
+  wrap.innerHTML = h + '</div>';
 }
 
 function renderHeader(div){
   const d = S[div].data;
-  const name = d ? d.name : (cfg[div].sku || 'Not configured');
+  const name = (d && d.phase==='bracket') ? 'Finals' : (d ? d.name : (cfg[div].sku || 'Not configured'));
   document.getElementById('b-'+div).innerHTML = (isDouble() ? '<span class="div">'+div.toUpperCase()+':</span> ' : '')+esc(name);
   renderStatus(div);
 }
@@ -1006,18 +1026,21 @@ function renderBracket(div){
   if (!d || d.phase!=='bracket'){ el.innerHTML=''; return; }
   const by = {}; (d.elims||[]).forEach(m=>{ by[m.slot]=m; });
   const al = {}; (d.alliances||[]).forEach(a=>{ al[a.n]=a.teams; });
-  /* red side = first feeder, blue side = second feeder (matches VEX's own bracket) */
+  /* seed numbers for any team list that appears in the Round of 16 */
+  const seedOf = {};
+  for (let s=1; s<=8; s++){ const m = by[s]; if (m){ if (m.red.length) seedOf[m.red.join(' ')] = SEED[s][0]; if (m.blue.length) seedOf[m.blue.join(' ')] = SEED[s][1]; } }
+  Object.keys(al).forEach(n=>{ if (al[n] && al[n].length) seedOf[al[n].join(' ')] = +n; });
+  /* red side = first feeder, blue side = second feeder (matches VEX's own bracket).
+     Winners are never copied forward: the Round of 16 shows its alliances from the start, and every later block
+     stays a placeholder until its own match has been scored. */
   function side(slot, i){
-    const m = by[slot]; let seed=null, teams=null, ph='';
-    if (slot<=8){ seed=SEED[slot][i]; teams=(al[seed]&&al[seed].length)?al[seed]:null; ph='ALLIANCE '+seed; }
-    else { const f=FEED[slot][i]; ph='W '+slotName(f); const w=winner(f); if (w){ seed=w.seed; teams=w.teams; } }
+    const m = by[slot]; let seed = null, teams = null, ph = '';
+    if (slot<=8){ seed = SEED[slot][i]; ph = 'ALLIANCE '+seed; } else { ph = 'W '+slotName(FEED[slot][i]); }
     const own = m ? (i ? m.blue : m.red) : null;
-    if (own && own.length) teams = own;
+    if (own && own.length && (slot<=8 || m.scored)) teams = own;
+    else if (slot<=8 && al[seed] && al[seed].length) teams = al[seed];
+    if (teams && seed===null && seedOf[teams.join(' ')] !== undefined) seed = seedOf[teams.join(' ')];
     return {seed:seed, teams:teams, ph:ph};
-  }
-  function winner(slot){
-    const m = by[slot]; if (!m || !m.scored || m.rs===m.bs) return null;
-    return side(slot, m.rs>m.bs ? 0 : 1);
   }
   const line = (cls,x,score,win,lose) => '<div class="bl '+cls+(win?' win':'')+(lose?' lose':'')+'"><span class="sd num">'+(x.seed==null?'':x.seed)+'</span><span class="bt'+(x.teams?'':' ph')+'">'+esc(x.teams?x.teams.join(' '):x.ph)+'</span><span class="bs num">'+(score==null?'':score)+'</span></div>';
   function card(slot){
