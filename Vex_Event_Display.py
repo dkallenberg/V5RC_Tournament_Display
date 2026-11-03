@@ -30,10 +30,10 @@ API_BASE_DEFAULT = "https://events.vex.com/api/v2"
 DEFAULT_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJhdWQiOiIzIiwianRpIjoiNzMzODkyNTBjNjA3MTg1NGI1YTA4Njg5MDNmYTkwMmM2MjM3YjBkYTQzZmNmODQzOTc0MjA5NmM5MmE3MzcwNGExZmI2ZmE0YWNmZjUyYmYiLCJpYXQiOjE3OTM0MDYzOTIuMzYxMjYwOSwibmJmIjoxNzkzNDA2MzkyLjM2MTI2MywiZXhwIjoyNzQwMTc3NTkyLjM1NjY5MjgsInN1YiI6IjEyMzUzOSIsInNjb3BlcyI6W119.BZpXY1KL9WZHW_O-igw3qa1d4gBhW0efci3RfeCH5eHf_66T1zYQx0uuhBjpmRjFPBaEu2V_8bR0wQs4H7j1cb4oz3_Vwd_zle8VWBcdL7ScjfGL1rF69Mpv8W8Tja1RH6Pe3Hus3RHlf-MN4Kh1osLJSu-kIsKaPpZBIwtFTVPHGK7L5V7d0j9Nr5AHudovAiSYk8Xzl8kM7F1OhkpwrsyBeK59XzaLu5VeKWt0gKtBj444U53YJlMuxqdu7g2mO5ZssXZJHLhBwY1pfXxMu8V-Pt_vvlmNF1YqXpMLx8AhrVhhwlVCnH2VrPsu4xqTKi431Lld3WcQTsJZvQbdZbU5B7gfMTgE0HoWjkTXZDjzJI8mhD8UmQG1DyRpiLmtIL5lBcIyoKntfhR8uvdnlEG1u6LnUN2kaTg6amUAUDMAT5KI7iRd4C-6jIiIIB_Yo3R8D_no-Sqmg3UixFwyqC7W1dRi18X1NYgEMtxEwvPjc1r_0RS3HLy3oHah0-FFj5FpXYu0oZ1SgyZaZYCR5mqiIHwG7kfgYrn5c2SSFLqgzs6eZRTZ8F1qirWBe83oMZYw1wACP3rK4yHXT5aWUPDEprnQBbmBGyU8bgLczJU48SlF9Yxc7G0bEhvXjjKd04iMiuIkLxpalniq-m-aqgII86qNsyjogWECWspRrSo"
 
 DEFAULT_CONFIG = {
-    "view": "double",  # single = one tournament full screen (HS settings) | double = HS left + MS right
+    "view": "single",  # single = one tournament full screen (HS settings) | double = HS left + MS right
     "hideBar": False,  # True = never show the bottom status bar (otherwise it hides itself after 10 minutes)
-    "hs": {"sku": "", "demo": True, "phase": "auto", "fields": 2, "division": ""},
-    "ms": {"sku": "", "demo": True, "phase": "auto", "fields": 2, "division": ""},
+    "hs": {"sku": "", "demo": False, "phase": "auto", "fields": 2, "division": ""},
+    "ms": {"sku": "", "demo": False, "phase": "auto", "fields": 2, "division": ""},
     "rankWait": 300,   # seconds to wait after the last qual is scored before showing rankings only
     "poll": 15,
     "scroll": 8,
@@ -46,6 +46,8 @@ CFG_LOCK = threading.Lock()
 CONFIG = json.loads(json.dumps(DEFAULT_CONFIG))
 COMMAND = {"seq": 0, "cmd": ""}
 BAR_SECONDS = 600
+SERVER_START = time.time()
+DEMO_START = {"hs": SERVER_START, "ms": SERVER_START}   # when each division's demo timeline began
 BAR_UNTIL = time.time() + BAR_SECONDS      # bottom status bar shows until this time (10 min after start)
 CACHE = {}          # division -> {"t": ts, "data": normalized}
 LAST_GOOD = {}      # division -> normalized data from last successful fetch
@@ -94,8 +96,8 @@ def sanitize_config(c):
     out["rankWait"] = clamp(c.get("rankWait"), 0, 3600, 300)
     out["poll"] = clamp(c.get("poll"), 5, 300, 15)
     out["scroll"] = clamp(c.get("scroll"), 3, 120, 8)
-    v = str(c.get("view", "double"))
-    out["view"] = "single" if v in ("single", "hs", "ms") else "double"
+    v = str(c.get("view", "single"))
+    out["view"] = "double" if v in ("double", "both") else "single"
     out["hideBar"] = bool(c.get("hideBar", False))
     base = str(c.get("apiBase") or API_BASE_DEFAULT).strip().rstrip("/")
     out["apiBase"] = base if base.startswith("http") else API_BASE_DEFAULT
@@ -124,6 +126,8 @@ def save_config(new):
             merged["ms"] = json.loads(json.dumps(CONFIG.get("ms") or DEFAULT_CONFIG["ms"]))
         for d in ("hs", "ms"):
             old_e = CONFIG.get(d, {})
+            if merged[d]["demo"] and not old_e.get("demo"):
+                DEMO_START[d] = time.time()         # demo timeline starts when demo mode is selected
             if old_e.get("sku") != merged[d]["sku"] or old_e.get("demo") != merged[d]["demo"] or old_e.get("division") != merged[d]["division"]:
                 STATE[d] = {}     # new event: forget when quals finished
         save_state()
@@ -529,8 +533,14 @@ def sim_bracket(alliances, nscored, rnd):
     return out
 
 
-def demo_data(div):
-    """Loops through: quals -> all scored -> rankings only -> bracket filling in (about 10 min)."""
+# Demo timeline (seconds): quals advance 1 match / 3 s; 15 s on the final rankings (alliance selection);
+# bracket shown for 5 s; then 1 bracket match / 3 s; 15 s hold on the finished bracket; then it starts over.
+DEMO_QUAL_END = 3 * (60 - 2)
+DEMO_CYCLE = DEMO_QUAL_END + 15 + 5 + 3 * 15 + 15
+
+
+def demo_data(div, now):
+    """Demo event whose state depends on how long demo mode has been running (see timeline above)."""
     rnd = random.Random(7 if div == "hs" else 11)
     n_teams = 32
     teams = ["%d%s" % (1000 + i * 41 + (0 if div == "hs" else 9000), "ABCDEFG"[i % 7]) for i in range(n_teams)]
@@ -540,8 +550,8 @@ def demo_data(div):
         four = rnd.sample(teams, 4)
         matches.append({"num": n, "inst": 1, "field": fields[(n - 1) % 4], "red": four[:2], "blue": four[2:],
                         "_rs": rnd.randint(18, 96), "_bs": rnd.randint(18, 96)})
-    step = int(time.time() // 4) % 150
-    done = 60 if step >= 60 else max(14, step)
+    clock = (now - DEMO_START.get(div, SERVER_START)) % DEMO_CYCLE
+    done = 60 if clock >= DEMO_QUAL_END else min(60, 2 + int(clock // 3))
     for m in matches:
         sc = m["num"] <= done
         rs, bs = m.pop("_rs"), m.pop("_bs")
@@ -567,9 +577,10 @@ def demo_data(div):
         rankings.append({"rank": i, "team": t, "w": st["w"], "l": st["l"], "t": st["t"], "wp": st["wp"],
                          "ap": st["ap"], "sp": st["sp"], "avg": round(st["pts"] / st["n"], 1) if st["n"] else 0})
     alliances, elims = [], []
-    if step >= 72:
+    if clock >= DEMO_QUAL_END + 15:
         alliances = [{"n": i + 1, "teams": [order[i], order[31 - i]]} for i in range(16)]
-        elims = sim_bracket(alliances, max(0, (step - 76) // 3), random.Random(5))
+        since = clock - DEMO_QUAL_END - 15 - 5          # bracket sits unscored for its first 5 s
+        elims = sim_bracket(alliances, 0 if since < 0 else min(15, int(since // 3) + 1), random.Random(5))
     name = "Demo %s Championship" % ("High School" if div == "hs" else "Middle School")
     return {"name": name, "sku": "DEMO", "matches": matches, "rankings": rankings,
             "elims": elims, "alliances": alliances}
@@ -611,11 +622,11 @@ def get_division(div, force=False):
     entry = cfg[div]
     now = time.time()
     hit = CACHE.get(div)
-    if hit and not force and now - hit["t"] < 4:
+    if hit and not force and not entry["demo"] and now - hit["t"] < 4:
         return hit["data"]
     err, diag = "", []
     if entry["demo"]:
-        res = demo_data(div)
+        res = demo_data(div, now)
     else:
         if RATE_BLOCK.get(div, 0) > now:
             res, err = None, "Rate limited by events.vex.com; retrying shortly"
@@ -634,8 +645,13 @@ def get_division(div, force=False):
         out = {"name": "Not configured" if not entry["sku"] else entry["sku"], "sku": entry["sku"],
                "matches": [], "rankings": [], "elims": [], "alliances": [], "online": False, "error": err,
                "fetchedAt": int(now), "stale": False, "demo": False}
-    wait = 12 if entry["demo"] else cfg["rankWait"]
+    wait = 0 if entry["demo"] else cfg["rankWait"]
     out["phase"], out["rankingsIn"] = compute_phase(div, entry, out, wait, now)
+    if not entry["demo"] and entry.get("phase", "auto") == "auto":
+        if not SKU_RE.search(entry["sku"] or "") or not cfg.get("token"):
+            out["phase"] = "setup"                   # nothing configured yet
+        elif out.get("online") and not out["matches"] and not out["elims"]:
+            out["phase"] = "nosched"                 # event found, no schedule published yet
     out["rankWait"] = wait
     out["diag"] = diag
     CACHE[div] = {"t": now, "data": out}
@@ -716,12 +732,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(public_config(save_config(self._body())))
             elif path == "/api/command":
                 cmd = str(self._body().get("cmd", ""))
-                if cmd not in ("refresh", "nextpage", "reload", "clearcache", "showbar"):
+                if cmd not in ("refresh", "nextpage", "reload", "clearcache", "showbar", "restartdemo"):
                     return self._json({"error": "unknown command"}, 400)
                 global BAR_UNTIL
                 with CFG_LOCK:
                     if cmd == "showbar":
                         BAR_UNTIL = time.time() + BAR_SECONDS
+                    elif cmd == "restartdemo":
+                        for dv in DEMO_START:
+                            DEMO_START[dv] = time.time()
                     COMMAND["seq"] += 1
                     COMMAND["cmd"] = cmd
                     if cmd in ("refresh", "reload", "clearcache"):
@@ -803,10 +822,13 @@ td.avg{color:var(--green)}
 .sec.last{margin-bottom:.2rem}
 .queue-title{color:var(--gold)}
 .card.queuing{border-color:var(--gold);background:#2a2208;box-shadow:inset 0 0 0 .1rem var(--gold),0 0 1rem rgba(255,200,61,.35)}
-.flash{animation:flash 1s linear infinite}
-@keyframes flash{0%,49%{opacity:1}50%,100%{opacity:.1}}
-@keyframes softpulse{0%,100%{opacity:1}50%{opacity:.45}}
-@media (prefers-reduced-motion:reduce){.flash{animation:softpulse 2s ease-in-out infinite}}
+/* the first NOW QUEUING card flashes red/blue like police lights; the team numbers and bars stay steady */
+.card.police{animation:police .8s linear infinite}
+@keyframes police{
+  0%,49%{border-color:#ff2d45;background:#3a1218;box-shadow:inset 0 0 0 .15rem #ff2d45,0 0 1.8rem .2rem rgba(255,45,69,.9)}
+  50%,100%{border-color:#2f7bff;background:#101f3d;box-shadow:inset 0 0 0 .15rem #2f7bff,0 0 1.8rem .2rem rgba(47,123,255,.9)}
+}
+@media (prefers-reduced-motion:reduce){.card.police{animation:none}}
 .matches.dense{gap:.35rem}
 .matches.dense .card{padding:.15rem .6rem;gap:.1rem}
 .matches.dense .qbadge{font-size:1.15rem}
@@ -826,6 +848,16 @@ td.avg{color:var(--green)}
 #panes.single .ctitle{font-size:1.3rem}
 #panes.single .bh{font-size:1.15rem}
 #panes.single .sd{font-size:1.2rem;flex-basis:2rem}
+.msgbox{display:none;flex:1;min-height:0;flex-direction:column;align-items:center;justify-content:center;gap:1.4rem;text-align:center;padding:2rem}
+.pane.ph-msg .pbody{display:none}
+.pane.ph-msg .msgbox{display:flex}
+.msg-big{font-weight:800;font-size:3.4rem;color:var(--gold);letter-spacing:.03em;line-height:1.1}
+.msg-sub{font-size:1.9rem;color:var(--dim)}
+.msg-url{font-size:2.2rem;font-weight:700;color:var(--text)}
+#panes.single .msg-big{font-size:5.5rem}
+#panes.single .msg-sub{font-size:2.4rem}
+#panes.single .msg-url{font-size:3rem}
+#panes.single .bracket{grid-template-columns:repeat(4,1fr)}   /* full screen: each round is a quarter of the screen */
 /* phases: quals (default) | rankings (rankings only) | bracket */
 .bracket{display:none;min-height:0;min-width:0;padding:.7rem .8rem;grid-template-columns:repeat(6,1fr);grid-template-rows:auto repeat(8,minmax(0,1fr));column-gap:0;row-gap:.3rem}
 .pane.ph-bracket .bracket{display:grid}
@@ -885,7 +917,7 @@ document.getElementById('gear').innerHTML = icon('settings');
 
 /* ---------- config (server is source of truth; localStorage is the offline mirror) ---------- */
 const LS_KEY = 'vexKioskCfg';
-const DEFAULT_CFG = {view:'double',hideBar:false,hs:{sku:'',demo:true,fields:2},ms:{sku:'',demo:true,fields:2},poll:15,scroll:8,rev:0};
+const DEFAULT_CFG = {view:'single',hideBar:false,hs:{sku:'',demo:false,fields:2},ms:{sku:'',demo:false,fields:2},poll:15,scroll:8,rev:0};
 let cfg = (function(){ try { return Object.assign({}, DEFAULT_CFG, JSON.parse(localStorage.getItem(LS_KEY)||'{}')); } catch(e){ return Object.assign({}, DEFAULT_CFG); } })();
 function saveLocal(){ try { localStorage.setItem(LS_KEY, JSON.stringify(cfg)); } catch(e){} }
 
@@ -906,7 +938,8 @@ function buildPane(div){
         '<div class="sec next"><div class="sec-title queue-title">NOW QUEUING</div><div id="queue-'+div+'" class="sec next" style="flex:1"></div></div>'+
       '</div>'+
       '<div class="bracket" id="bk-'+div+'"></div>'+
-    '</div>';
+    '</div>'+
+    '<div class="msgbox" id="mg-'+div+'"></div>';
 }
 
 /* ---------- renderers ---------- */
@@ -919,10 +952,10 @@ function lastCard(m){
     '<div class="row2"><div class="alli red'+(bw?' lose':'')+'"><span class="teams">'+teamsHtml(m.red)+'</span><span class="score num">'+m.rs+'</span></div>'+
     '<div class="alli blue'+(rw?' lose':'')+'"><span class="teams">'+teamsHtml(m.blue)+'</span><span class="score num">'+m.bs+'</span></div></div></div>';
 }
-function nextCard(m, queuing){
-  const c = queuing ? 'flash' : '';
-  return '<div class="card'+(queuing?' queuing':'')+'"><div class="row1"><span class="qbadge num">Q '+m.num+'</span>'+(m.field?'<span class="field">Field: '+esc(m.field)+'</span>':'')+'</div>'+
-    '<div class="row2"><div class="alli red"><span class="teams">'+teamsHtml(m.red,c)+'</span></div><div class="alli blue"><span class="teams">'+teamsHtml(m.blue,c)+'</span></div></div></div>';
+function nextCard(m, mode){   /* mode: 'field' | 'queue' | 'first' (first queuing card flashes) */
+  const cls = mode==='first' ? ' queuing police' : mode==='queue' ? ' queuing' : '';
+  return '<div class="card'+cls+'"><div class="row1"><span class="qbadge num">Q '+m.num+'</span>'+(m.field?'<span class="field">Field: '+esc(m.field)+'</span>':'')+'</div>'+
+    '<div class="row2"><div class="alli red"><span class="teams">'+teamsHtml(m.red)+'</span></div><div class="alli blue"><span class="teams">'+teamsHtml(m.blue)+'</span></div></div></div>';
 }
 
 function pageSize(div){
@@ -953,8 +986,8 @@ function renderMatches(div){
   const upcoming = d.matches.filter(m=>!m.scored);
   const onField = upcoming.slice(0, n), queuing = upcoming.slice(n, 2*n);
   last.innerHTML = scored.length ? scored.map(lastCard).join('') : '<div class="empty">No matches scored yet</div>';
-  nxt.innerHTML = onField.length ? onField.map(m=>nextCard(m,false)).join('') : '<div class="empty">No matches on the fields</div>';
-  que.innerHTML = queuing.length ? queuing.map(m=>nextCard(m,true)).join('') : '<div class="empty">No matches queuing</div>';
+  nxt.innerHTML = onField.length ? onField.map(m=>nextCard(m,'field')).join('') : '<div class="empty">No matches on the fields</div>';
+  que.innerHTML = queuing.length ? queuing.map((m,i)=>nextCard(m, i===0 ? 'first' : 'queue')).join('') : '<div class="empty">No matches queuing</div>';
 }
 
 /* number of ranking columns: 1 in double mode; in single (full screen) 3 beside the matches, 4 when rankings-only */
@@ -979,12 +1012,24 @@ function renderRanks(div){
 }
 
 function renderHeader(div){
-  const d = S[div].data;
-  const name = (d && d.phase==='bracket') ? 'Finals' : (d ? d.name : (cfg[div].sku || 'Not configured'));
-  document.getElementById('b-'+div).innerHTML = (isDouble() ? '<span class="div">'+div.toUpperCase()+':</span> ' : '')+esc(name);
+  const d = S[div].data, ph = (d && d.phase) || 'quals';
+  const lbl = isDouble() ? '<span class="div">'+div.toUpperCase()+'</span> ' : '';
+  let txt;
+  if (ph==='quals' || ph==='nosched') txt = 'Quals';
+  else if (ph==='bracket') txt = 'Finals';
+  else if (ph==='setup') txt = 'Setup';
+  else txt = d ? d.name : (cfg[div].sku || 'Not configured');      /* rankings only: event name */
+  document.getElementById('b-'+div).innerHTML = lbl + esc(txt);
   renderStatus(div);
 }
-function isDouble(){ return (cfg.view || 'double') === 'double'; }
+function adminUrl(){ return 'http://'+ip+(location.port ? ':'+location.port : '')+'/admin'; }
+function renderMsg(div){
+  const d = S[div].data, box = document.getElementById('mg-'+div), ph = d && d.phase;
+  if (ph==='setup') box.innerHTML = '<div class="msg-big">SETUP NEEDS TO BE COMPLETED</div><div class="msg-sub">Open this address on any device on the network and enter the event details</div><div class="msg-url">'+esc(adminUrl())+'</div>';
+  else if (ph==='nosched') box.innerHTML = '<div class="msg-big">MATCH SCHEDULE NOT FINALIZED</div>'+(d.name?'<div class="msg-sub">'+esc(d.name)+'</div>':'')+'<div class="msg-sub">Matches will appear here automatically once they are published</div>';
+  else box.innerHTML = '';
+}
+function isDouble(){ return (cfg.view || 'single') === 'double'; }
 function visible(div){ return isDouble() || div === 'hs'; }   /* single mode shows the HS tournament only */
 function setBar(on){
   const f = document.getElementById('foot');
@@ -998,7 +1043,7 @@ function applyView(){
   pn.style.gridTemplateColumns = isDouble() ? '1fr 1fr' : '1fr';
   pn.classList.toggle('single', !isDouble());
 }
-function renderDiv(d){ if (!visible(d)) return; applyPhase(d); renderHeader(d); renderMatches(d); renderBracket(d); renderRanks(d); }
+function renderDiv(d){ if (!visible(d)) return; applyPhase(d); renderHeader(d); renderMsg(d); renderMatches(d); renderBracket(d); renderRanks(d); }
 function renderAll(){ applyView(); ['hs','ms'].forEach(renderDiv); renderFoot(); }
 
 function renderFoot(){
@@ -1013,6 +1058,7 @@ function applyPhase(div){
   const ph = d && d.phase ? d.phase : 'quals';
   p.classList.toggle('ph-rankings', ph==='rankings');
   p.classList.toggle('ph-bracket', ph==='bracket');
+  p.classList.toggle('ph-msg', ph==='setup' || ph==='nosched');
   document.getElementById('rt-'+div).textContent = ph==='rankings' ? 'FINAL QUALIFICATION RANKINGS' : 'TEAM RANKINGS';
 }
 
@@ -1052,13 +1098,15 @@ function renderBracket(div){
     return '<div class="bm'+(sc?' done':'')+'"><div class="bh">'+slotName(slot)+'</div>'+line('red',a,sc?m.rs:null,rw,bw)+line('blue',b,sc?m.bs:null,bw,rw)+'</div>';
   }
   let h = '';
-  ['ROUND OF 16','QUARTERFINALS','SEMIFINALS','FINALS'].forEach((t,i)=>{ h += '<div class="ctitle" style="grid-column:'+[1,3,4,5][i]+';grid-row:1;overflow:visible">'+t+'</div>'; });
+  ['ROUND OF 16','QUARTERFINALS','SEMIFINALS','FINALS'].forEach((t,i)=>{ h += '<div class="ctitle" style="grid-column:'+(isDouble() ? [1,3,4,5] : [1,2,3,4])[i]+';grid-row:1;overflow:visible">'+t+'</div>'; });
   for (let s=1; s<=15; s++){
-    const col = s<=8?1 : s<=12?3 : s<=14?4 : 5;   /* each round starts halfway across the previous one */
+    const sgl = !isDouble();
+    const col = sgl ? (s<=8?1 : s<=12?2 : s<=14?3 : 4)          /* full screen: one quarter per round */
+                    : (s<=8?1 : s<=12?3 : s<=14?4 : 5);          /* double: each round starts halfway across the previous one */
     const z = s<=8?4 : s<=12?3 : s<=14?2 : 1;     /* later rounds tuck underneath earlier ones */
     const span = s<=8?1 : s<=12?2 : s<=14?4 : 8;
     const start = s<=8 ? s : s<=12 ? 2*(s-9)+1 : s<=14 ? 4*(s-13)+1 : 1;
-    h += '<div class="bwrap" style="grid-column:'+col+' / span 2;grid-row:'+(start+1)+' / span '+span+';z-index:'+z+(s<=8?';padding-right:.9rem':'')+'">'+card(s)+'</div>';
+    h += '<div class="bwrap" style="grid-column:'+col+' / span '+(sgl?1:2)+';grid-row:'+(start+1)+' / span '+span+';z-index:'+z+((sgl ? s<15 : s<=8)?';padding-right:.9rem':'')+'">'+card(s)+'</div>';
   }
   el.innerHTML = h;
 }
@@ -1077,7 +1125,7 @@ async function poll(div){
     s.data = d; s.fails = d.online ? 0 : Math.min(s.fails+1, 2);
   } catch(e){ s.fails++; }
   renderDiv(div);
-  const delay = s.fails ? Math.min(cfg.poll*1000*Math.pow(2, s.fails-1), 60000) : cfg.poll*1000;
+  const delay = s.fails ? Math.min(cfg.poll*1000*Math.pow(2, s.fails-1), 60000) : ((s.data && s.data.demo) ? 2000 : cfg.poll*1000);
   s.timer = setTimeout(()=>poll(div), delay);
 }
 function pollAll(){ poll('hs'); poll('ms'); }
@@ -1089,7 +1137,7 @@ async function syncControl(){
     if (lastSeq === null){ lastSeq = c.seq; }
     else if (c.seq !== lastSeq){
       lastSeq = c.seq;
-      if (c.cmd==='refresh') pollAll();
+      if (c.cmd==='refresh' || c.cmd==='restartdemo') pollAll();
       else if (c.cmd==='nextpage'){ page++; countdown = cfg.scroll; renderAll(); }
       else if (c.cmd==='reload') location.reload();
       else if (c.cmd==='clearcache') clearEverything();
@@ -1179,6 +1227,7 @@ ADMIN_HTML = r"""<!DOCTYPE html>
     <select id="view"><option value="single">1. Single tournament (FULL SCREEN)</option><option value="double">2. Double tournament: HS (left) and MS (right)</option></select>
     <p class="text-xs" style="color:#8da2ba">Single uses the High School settings below and locks the Middle School settings. Only the tournament(s) shown are polled from events.vex.com.</p>
     <label class="flex items-center gap-2 pt-2" style="color:#eef3f9"><input type="checkbox" id="hideBar"> Hide the bottom status bar from the start (otherwise it disappears 10 minutes after the display starts)</label>
+    <p class="text-xs" style="color:#8da2ba">Demo mode plays a whole event: one qualification match every 3 seconds, 15 seconds on the final rankings (alliance selection), the bracket for 5 seconds, then one bracket match every 3 seconds, then it starts over.</p>
   </section>
 
   <section class="grid md:grid-cols-2 gap-6">
@@ -1222,6 +1271,7 @@ ADMIN_HTML = r"""<!DOCTYPE html>
     <div class="flex flex-wrap gap-2">
       <button class="btn" data-cmd="refresh"><span data-i="refresh"></span>Force data refresh</button>
       <button class="btn" data-cmd="nextpage"><span data-i="next"></span>Cycle rank page</button>
+      <button class="btn" data-cmd="restartdemo"><span data-i="refresh"></span>Restart demo</button>
       <button class="btn" data-cmd="showbar"><span data-i="monitor"></span>Show status bar for 10 min</button>
       <button class="btn" data-cmd="reload"><span data-i="refresh"></span>Reload kiosk page</button>
       <button class="btn danger" data-cmd="clearcache"><span data-i="trash"></span>Clear kiosk browser cache</button>
@@ -1261,7 +1311,7 @@ function fill(){
   $('ms-sku').value = cfg.ms.sku; $('ms-demo').checked = !!cfg.ms.demo; $('ms-div').value = cfg.ms.division || ''; $('ms-phase').value = cfg.ms.phase || 'auto'; $('ms-fields').value = cfg.ms.fields || 2;
   $('rankWait').value = cfg.rankWait == null ? 300 : cfg.rankWait;
   $('poll').value = cfg.poll; $('scroll').value = cfg.scroll;
-  $('view').value = cfg.view === 'single' ? 'single' : 'double'; $('hideBar').checked = !!cfg.hideBar; applyLock(); $('apiBase').value = cfg.apiBase || ''; $('token').value = '';
+  $('view').value = cfg.view === 'double' ? 'double' : 'single'; $('hideBar').checked = !!cfg.hideBar; applyLock(); $('apiBase').value = cfg.apiBase || ''; $('token').value = '';
   $('token-hint').textContent = cfg.tokenSet ? ('A token is saved (ends ' + cfg.tokenHint + ')' + (cfg.tokenExpired ? ', EXPIRED' : cfg.tokenExp ? ', valid until ' + cfg.tokenExp : '') + '. Paste a new one here only to replace it.') : 'No token saved yet.';
 }
 function read(){
@@ -1274,7 +1324,7 @@ function read(){
 }
 async function load(){
   try { const r = await fetch('/api/config',{cache:'no-store'}); cfg = await r.json(); localStorage.setItem(LS_KEY, JSON.stringify(cfg)); }
-  catch(e){ try { cfg = JSON.parse(localStorage.getItem(LS_KEY)); } catch(_){} if(!cfg) cfg = {view:'double',hs:{sku:'',demo:true,fields:2},ms:{sku:'',demo:true,fields:2},poll:15,scroll:8,rev:1}; toast('Server unreachable: showing locally saved settings', false); }
+  catch(e){ try { cfg = JSON.parse(localStorage.getItem(LS_KEY)); } catch(_){} if(!cfg) cfg = {view:'single',hs:{sku:'',demo:false,fields:2},ms:{sku:'',demo:false,fields:2},poll:15,scroll:8,rev:1}; toast('Server unreachable: showing locally saved settings', false); }
   fill();
 }
 function applyLock(){
