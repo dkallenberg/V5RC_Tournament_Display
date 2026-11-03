@@ -14,7 +14,8 @@ Chromium kiosk launch (Pi desktop):
   chromium-browser --kiosk --noerrdialogs --disable-infobars \
       --autoplay-policy=no-user-gesture-required http://localhost:5000/
 """
-import argparse, base64, json, os, random, re, socket, threading, time
+import argparse, base64, datetime, json, os, random, re, socket, threading, time
+import traceback
 import urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -29,7 +30,8 @@ API_BASE_DEFAULT = "https://events.vex.com/api/v2"
 DEFAULT_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJhdWQiOiIzIiwianRpIjoiNzMzODkyNTBjNjA3MTg1NGI1YTA4Njg5MDNmYTkwMmM2MjM3YjBkYTQzZmNmODQzOTc0MjA5NmM5MmE3MzcwNGExZmI2ZmE0YWNmZjUyYmYiLCJpYXQiOjE3OTM0MDYzOTIuMzYxMjYwOSwibmJmIjoxNzkzNDA2MzkyLjM2MTI2MywiZXhwIjoyNzQwMTc3NTkyLjM1NjY5MjgsInN1YiI6IjEyMzUzOSIsInNjb3BlcyI6W119.BZpXY1KL9WZHW_O-igw3qa1d4gBhW0efci3RfeCH5eHf_66T1zYQx0uuhBjpmRjFPBaEu2V_8bR0wQs4H7j1cb4oz3_Vwd_zle8VWBcdL7ScjfGL1rF69Mpv8W8Tja1RH6Pe3Hus3RHlf-MN4Kh1osLJSu-kIsKaPpZBIwtFTVPHGK7L5V7d0j9Nr5AHudovAiSYk8Xzl8kM7F1OhkpwrsyBeK59XzaLu5VeKWt0gKtBj444U53YJlMuxqdu7g2mO5ZssXZJHLhBwY1pfXxMu8V-Pt_vvlmNF1YqXpMLx8AhrVhhwlVCnH2VrPsu4xqTKi431Lld3WcQTsJZvQbdZbU5B7gfMTgE0HoWjkTXZDjzJI8mhD8UmQG1DyRpiLmtIL5lBcIyoKntfhR8uvdnlEG1u6LnUN2kaTg6amUAUDMAT5KI7iRd4C-6jIiIIB_Yo3R8D_no-Sqmg3UixFwyqC7W1dRi18X1NYgEMtxEwvPjc1r_0RS3HLy3oHah0-FFj5FpXYu0oZ1SgyZaZYCR5mqiIHwG7kfgYrn5c2SSFLqgzs6eZRTZ8F1qirWBe83oMZYw1wACP3rK4yHXT5aWUPDEprnQBbmBGyU8bgLczJU48SlF9Yxc7G0bEhvXjjKd04iMiuIkLxpalniq-m-aqgII86qNsyjogWECWspRrSo"
 
 DEFAULT_CONFIG = {
-    "view": "both",    # which tournaments the kiosk shows: both | hs | ms
+    "view": "double",  # single = one tournament full screen (HS settings) | double = HS left + MS right
+    "hideBar": False,  # True = never show the bottom status bar (otherwise it hides itself after 10 minutes)
     "hs": {"sku": "", "demo": True, "phase": "auto", "fields": 2, "division": ""},
     "ms": {"sku": "", "demo": True, "phase": "auto", "fields": 2, "division": ""},
     "rankWait": 300,   # seconds to wait after the last qual is scored before showing rankings only
@@ -43,6 +45,8 @@ DEFAULT_CONFIG = {
 CFG_LOCK = threading.Lock()
 CONFIG = json.loads(json.dumps(DEFAULT_CONFIG))
 COMMAND = {"seq": 0, "cmd": ""}
+BAR_SECONDS = 600
+BAR_UNTIL = time.time() + BAR_SECONDS      # bottom status bar shows until this time (10 min after start)
 CACHE = {}          # division -> {"t": ts, "data": normalized}
 LAST_GOOD = {}      # division -> normalized data from last successful fetch
 STATE_PATH = os.path.join(HERE, "kiosk_state.json")
@@ -90,8 +94,9 @@ def sanitize_config(c):
     out["rankWait"] = clamp(c.get("rankWait"), 0, 3600, 300)
     out["poll"] = clamp(c.get("poll"), 5, 300, 15)
     out["scroll"] = clamp(c.get("scroll"), 3, 120, 8)
-    v = str(c.get("view", "both"))
-    out["view"] = v if v in ("both", "hs", "ms") else "both"
+    v = str(c.get("view", "double"))
+    out["view"] = "single" if v in ("single", "hs", "ms") else "double"
+    out["hideBar"] = bool(c.get("hideBar", False))
     base = str(c.get("apiBase") or API_BASE_DEFAULT).strip().rstrip("/")
     out["apiBase"] = base if base.startswith("http") else API_BASE_DEFAULT
     out["token"] = str(c.get("token") or DEFAULT_TOKEN).strip()
@@ -115,6 +120,8 @@ def save_config(new):
         new = dict(new)
         new["token"] = str(new.get("token") or "").strip() or CONFIG.get("token") or DEFAULT_TOKEN  # blank = keep
         merged = sanitize_config(new)
+        if merged["view"] == "single":     # single-tournament mode: the MS settings are locked
+            merged["ms"] = json.loads(json.dumps(CONFIG.get("ms") or DEFAULT_CONFIG["ms"]))
         for d in ("hs", "ms"):
             old_e = CONFIG.get(d, {})
             if old_e.get("sku") != merged[d]["sku"] or old_e.get("demo") != merged[d]["demo"] or old_e.get("division") != merged[d]["division"]:
@@ -139,8 +146,16 @@ def token_exp(tok):
         part += "=" * (-len(part) % 4)
         exp = json.loads(base64.urlsafe_b64decode(part)).get("exp")
         return float(exp) if exp else None
-    except (IndexError, ValueError, TypeError):
+    except (IndexError, ValueError, TypeError, OverflowError):
         return None
+
+
+def fmt_date(ts):
+    """YYYY-MM-DD for a Unix time. Pure Python, so it also works past 2038 on 32-bit Raspberry Pi OS."""
+    try:
+        return (datetime.datetime(1970, 1, 1) + datetime.timedelta(seconds=ts)).strftime("%Y-%m-%d")
+    except (OverflowError, ValueError, OSError, TypeError):
+        return ""
 
 
 def public_config(cfg):
@@ -150,7 +165,7 @@ def public_config(cfg):
     exp = token_exp(tok)
     out["tokenSet"] = bool(tok)
     out["tokenHint"] = tok[-6:] if tok else ""
-    out["tokenExp"] = time.strftime("%Y-%m-%d", time.gmtime(exp)) if exp else ""
+    out["tokenExp"] = fmt_date(exp) if exp else ""
     out["tokenExpired"] = bool(exp and exp < time.time())
     return out
 
@@ -631,7 +646,7 @@ def get_division(div, force=False):
 # HTTP server
 # --------------------------------------------------------------------------
 class Handler(BaseHTTPRequestHandler):
-    server_version = "VexKiosk/1.0"
+    server_version = "VexEventDisplay/1.0"
 
     def log_message(self, fmt, *args):
         pass
@@ -670,7 +685,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ip": local_ip(), "port": self.server.server_address[1], "time": int(time.time())})
             elif path == "/api/command":
                 with CFG_LOCK:
-                    self._json({"seq": COMMAND["seq"], "cmd": COMMAND["cmd"], "rev": CONFIG["rev"]})
+                    self._json({"seq": COMMAND["seq"], "cmd": COMMAND["cmd"], "rev": CONFIG["rev"],
+                                "barLeft": max(0, int(BAR_UNTIL - time.time()))})
             elif path in ("/api/data/hs", "/api/data/ms"):
                 self._json(get_division(path[-2:]))
             elif path in ("/api/test/hs", "/api/test/ms"):
@@ -690,7 +706,8 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as e:
-            self._json({"error": str(e)}, 500)
+            traceback.print_exc()
+            self._json({"error": "%s: %s" % (type(e).__name__, e)}, 500)
 
     def do_POST(self):
         path = self.path.split("?")[0].rstrip("/")
@@ -699,9 +716,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(public_config(save_config(self._body())))
             elif path == "/api/command":
                 cmd = str(self._body().get("cmd", ""))
-                if cmd not in ("refresh", "nextpage", "reload", "clearcache"):
+                if cmd not in ("refresh", "nextpage", "reload", "clearcache", "showbar"):
                     return self._json({"error": "unknown command"}, 400)
+                global BAR_UNTIL
                 with CFG_LOCK:
+                    if cmd == "showbar":
+                        BAR_UNTIL = time.time() + BAR_SECONDS
                     COMMAND["seq"] += 1
                     COMMAND["cmd"] = cmd
                     if cmd in ("refresh", "reload", "clearcache"):
@@ -712,7 +732,8 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as e:
-            self._json({"error": str(e)}, 500)
+            traceback.print_exc()
+            self._json({"error": "%s: %s" % (type(e).__name__, e)}, 500)
 
 
 # --------------------------------------------------------------------------
@@ -723,7 +744,7 @@ KIOSK_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>VEX Kiosk</title>
+<title>VEX Event Display</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <style>
 /* All kiosk layout lives in this stylesheet so the display still works if the Tailwind CDN is unreachable. */
@@ -820,10 +841,11 @@ td.avg{color:var(--green)}
 .bl.win .bs{color:#fff}
 .bl.lose{opacity:.45}
 .bcell.fin .bm{flex:0 1 auto;max-height:none;padding:.35rem .45rem}
-#foot{flex:0 0 auto;display:flex;justify-content:space-between;align-items:center;gap:1.5rem;padding:.55rem 1.4rem;background:#070a0f;border-top:.14rem solid var(--line);font-size:1.3rem;font-weight:700;color:var(--dim);white-space:nowrap}
+#foot{flex:0 0 auto;display:none;justify-content:space-between;align-items:center;gap:1.5rem;padding:.55rem 1.4rem;background:#070a0f;border-top:.14rem solid var(--line);font-size:1.3rem;font-weight:700;color:var(--dim);white-space:nowrap}
 #foot b{color:var(--text)}
 #foot .ok{color:var(--green)}
 #foot .bad{color:var(--red)}
+#foot.on{display:flex}
 #gear{position:fixed;top:.4rem;right:.5rem;width:2.4rem;height:2.4rem;color:var(--dim);opacity:.12;cursor:pointer;z-index:10;transition:opacity .2s}
 #gear:hover{opacity:1}
 #gear svg{width:100%;height:100%}
@@ -852,7 +874,7 @@ document.getElementById('gear').innerHTML = icon('settings');
 
 /* ---------- config (server is source of truth; localStorage is the offline mirror) ---------- */
 const LS_KEY = 'vexKioskCfg';
-const DEFAULT_CFG = {view:'both',hs:{sku:'',demo:true,fields:2},ms:{sku:'',demo:true,fields:2},poll:15,scroll:8,rev:0};
+const DEFAULT_CFG = {view:'double',hideBar:false,hs:{sku:'',demo:true,fields:2},ms:{sku:'',demo:true,fields:2},poll:15,scroll:8,rev:0};
 let cfg = (function(){ try { return Object.assign({}, DEFAULT_CFG, JSON.parse(localStorage.getItem(LS_KEY)||'{}')); } catch(e){ return Object.assign({}, DEFAULT_CFG); } })();
 function saveLocal(){ try { localStorage.setItem(LS_KEY, JSON.stringify(cfg)); } catch(e){} }
 
@@ -939,15 +961,22 @@ function renderRanks(div){
 function renderHeader(div){
   const d = S[div].data;
   const name = d ? d.name : (cfg[div].sku || 'Not configured');
-  document.getElementById('b-'+div).innerHTML = '<span class="div">'+div.toUpperCase()+':</span> '+esc(name);
+  document.getElementById('b-'+div).innerHTML = (isDouble() ? '<span class="div">'+div.toUpperCase()+':</span> ' : '')+esc(name);
   renderStatus(div);
 }
-function visible(div){ const v = cfg.view || 'both'; return v==='both' || v===div; }
+function isDouble(){ return (cfg.view || 'double') === 'double'; }
+function visible(div){ return isDouble() || div === 'hs'; }   /* single mode shows the HS tournament only */
+function setBar(on){
+  const f = document.getElementById('foot');
+  if (f.classList.contains('on') === on) return;
+  f.classList.toggle('on', on);
+  requestAnimationFrame(()=>['hs','ms'].forEach(renderRanks));   /* panes grow/shrink, re-fit the rank pages */
+}
 function applyView(){
-  const v = cfg.view || 'both', pn = document.getElementById('panes');
+  const pn = document.getElementById('panes');
   ['hs','ms'].forEach(d=>{ document.getElementById('pane-'+d).style.display = visible(d) ? '' : 'none'; });
-  pn.style.gridTemplateColumns = v==='both' ? '1fr 1fr' : '1fr';
-  pn.classList.toggle('single', v!=='both');
+  pn.style.gridTemplateColumns = isDouble() ? '1fr 1fr' : '1fr';
+  pn.classList.toggle('single', !isDouble());
 }
 function renderDiv(d){ if (!visible(d)) return; applyPhase(d); renderHeader(d); renderMatches(d); renderBracket(d); renderRanks(d); }
 function renderAll(){ applyView(); ['hs','ms'].forEach(renderDiv); renderFoot(); }
@@ -1043,6 +1072,7 @@ async function syncControl(){
       const nc = await fetchJson('/api/config', 4000);
       cfg = nc; saveLocal(); countdown = Math.min(countdown, cfg.scroll); pollAll(); renderAll();
     }
+    setBar(!cfg.hideBar && c.barLeft > 0);      /* status bar: hidden by setting, or after 10 minutes */
   } catch(e){ /* server unreachable: keep running on cached cfg + data */ }
 }
 async function clearEverything(){
@@ -1062,7 +1092,7 @@ window.addEventListener('online', pollAll);
 
 /* ---------- boot ---------- */
 (async function(){
-  buildPane('hs'); buildPane('ms'); renderAll();
+  buildPane('hs'); buildPane('ms'); renderAll(); setBar(!cfg.hideBar);
   try { const si = await fetchJson('/api/sysinfo', 4000); ip = si.ip; } catch(e){}
   try { cfg = await fetchJson('/api/config', 4000); saveLocal(); } catch(e){}
   countdown = cfg.scroll; renderAll(); pollAll();
@@ -1084,7 +1114,7 @@ ADMIN_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>VEX Kiosk Admin</title>
+<title>VEX Event Display Admin</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <style>
   body{background:#0a0e14;color:#eef3f9;font-family:"Barlow","Segoe UI","DejaVu Sans",Arial,sans-serif}
@@ -1107,11 +1137,11 @@ ADMIN_HTML = r"""<!DOCTYPE html>
 <main class="max-w-5xl mx-auto p-4 md:p-8 space-y-6">
   <header class="flex flex-wrap items-center justify-between gap-3">
     <div>
-      <h1 class="text-2xl font-bold">VEX Kiosk Setup</h1>
+      <h1 class="text-2xl font-bold">VEX Event Display Setup</h1>
       <p class="text-sm" style="color:#8da2ba">Kiosk: <a class="underline" id="kiosk-link" href="/">/</a> &nbsp; Admin: <span id="admin-link"></span></p>
     </div>
     <div class="flex gap-2">
-      <a class="btn" href="/" target="_blank"><span data-i="monitor"></span>Open kiosk</a>
+      <a class="btn" href="/" target="_blank"><span data-i="monitor"></span>Open display</a>
       <button class="btn primary" id="save"><span data-i="save"></span>Save settings</button>
     </div>
   </header>
@@ -1120,12 +1150,13 @@ ADMIN_HTML = r"""<!DOCTYPE html>
 
   <section class="card space-y-2">
     <h2 class="font-bold text-lg">Tournaments shown on the kiosk</h2>
-    <select id="view"><option value="both">Both: HS (left) and MS (right)</option><option value="hs">High School only (full screen)</option><option value="ms">Middle School only (full screen)</option></select>
-    <p class="text-xs" style="color:#8da2ba">Only the tournament(s) shown are polled from events.vex.com.</p>
+    <select id="view"><option value="single">1. Single tournament (FULL SCREEN)</option><option value="double">2. Double tournament: HS (left) and MS (right)</option></select>
+    <p class="text-xs" style="color:#8da2ba">Single uses the High School settings below and locks the Middle School settings. Only the tournament(s) shown are polled from events.vex.com.</p>
+    <label class="flex items-center gap-2 pt-2" style="color:#eef3f9"><input type="checkbox" id="hideBar"> Hide the bottom status bar from the start (otherwise it disappears 10 minutes after the display starts)</label>
   </section>
 
   <section class="grid md:grid-cols-2 gap-6">
-    <div class="card space-y-3">
+    <div class="card space-y-3" id="hs-card">
       <h2 class="font-bold text-lg">High School event</h2>
       <div><label for="hs-sku">Event SKU or events.vex.com URL</label><input type="text" id="hs-sku" placeholder="RE-V5RC-XX-XXXX"></div>
       <label class="flex items-center gap-2" style="color:#eef3f9"><input type="checkbox" id="hs-demo"> Use demo data (no internet needed)</label>
@@ -1134,8 +1165,9 @@ ADMIN_HTML = r"""<!DOCTYPE html>
       <div><label for="hs-phase">Display mode</label><select id="hs-phase"><option value="auto">Automatic (quals, then rankings, then bracket)</option><option value="quals">Always show qualification matches</option><option value="rankings">Always show rankings only</option><option value="bracket">Always show bracket</option></select></div>
       <div class="flex gap-2"><button class="btn" data-test="hs"><span data-i="activity"></span>Test HS connection</button></div>
     </div>
-    <div class="card space-y-3">
+    <div class="card space-y-3" id="ms-card">
       <h2 class="font-bold text-lg">Middle School event</h2>
+      <p id="ms-lock" class="text-sm warn hidden">Locked: single-tournament mode shows only the High School tournament.</p>
       <div><label for="ms-sku">Event SKU or events.vex.com URL</label><input type="text" id="ms-sku" placeholder="RE-V5RC-XX-XXXX"></div>
       <label class="flex items-center gap-2" style="color:#eef3f9"><input type="checkbox" id="ms-demo"> Use demo data (no internet needed)</label>
       <div><label for="ms-div">Division (optional: id or name, blank = first division of the event)</label><input type="text" id="ms-div"></div>
@@ -1153,7 +1185,7 @@ ADMIN_HTML = r"""<!DOCTYPE html>
 
   <section class="card space-y-3">
     <h2 class="font-bold text-lg">events.vex.com connection</h2>
-    <div><label for="token">API bearer token</label><input type="password" id="token" autocomplete="off" placeholder="leave blank to keep the saved token">
+    <div><label for="token">API bearer token</label><input type="password" id="token" name="vex-api-token" autocomplete="new-password" placeholder="leave blank to keep the saved token">
       <p id="token-hint" class="text-xs mt-1" style="color:#8da2ba"></p></div>
     <div><label for="apiBase">API base URL</label><input type="text" id="apiBase"></div>
     <p class="text-xs" style="color:#8da2ba">Each tournament makes 2 requests per poll (matches + rankings). Intervals under 15 s on both tournaments may hit rate limits; the kiosk pauses and keeps showing the last data if that happens.</p>
@@ -1164,6 +1196,7 @@ ADMIN_HTML = r"""<!DOCTYPE html>
     <div class="flex flex-wrap gap-2">
       <button class="btn" data-cmd="refresh"><span data-i="refresh"></span>Force data refresh</button>
       <button class="btn" data-cmd="nextpage"><span data-i="next"></span>Cycle rank page</button>
+      <button class="btn" data-cmd="showbar"><span data-i="monitor"></span>Show status bar for 10 min</button>
       <button class="btn" data-cmd="reload"><span data-i="refresh"></span>Reload kiosk page</button>
       <button class="btn danger" data-cmd="clearcache"><span data-i="trash"></span>Clear kiosk browser cache</button>
     </div>
@@ -1202,7 +1235,7 @@ function fill(){
   $('ms-sku').value = cfg.ms.sku; $('ms-demo').checked = !!cfg.ms.demo; $('ms-div').value = cfg.ms.division || ''; $('ms-phase').value = cfg.ms.phase || 'auto'; $('ms-fields').value = cfg.ms.fields || 2;
   $('rankWait').value = cfg.rankWait == null ? 300 : cfg.rankWait;
   $('poll').value = cfg.poll; $('scroll').value = cfg.scroll;
-  $('view').value = cfg.view || 'both'; $('apiBase').value = cfg.apiBase || ''; $('token').value = '';
+  $('view').value = cfg.view === 'single' ? 'single' : 'double'; $('hideBar').checked = !!cfg.hideBar; applyLock(); $('apiBase').value = cfg.apiBase || ''; $('token').value = '';
   $('token-hint').textContent = cfg.tokenSet ? ('A token is saved (ends ' + cfg.tokenHint + ')' + (cfg.tokenExpired ? ', EXPIRED' : cfg.tokenExp ? ', valid until ' + cfg.tokenExp : '') + '. Paste a new one here only to replace it.') : 'No token saved yet.';
 }
 function read(){
@@ -1210,18 +1243,24 @@ function read(){
     hs:{sku:$('hs-sku').value.trim(), demo:$('hs-demo').checked, phase:$('hs-phase').value, division:$('hs-div').value.trim(), fields:+$('hs-fields').value||2},
     ms:{sku:$('ms-sku').value.trim(), demo:$('ms-demo').checked, phase:$('ms-phase').value, division:$('ms-div').value.trim(), fields:+$('ms-fields').value||2},
     rankWait: $('rankWait').value === '' ? 300 : +$('rankWait').value,
-    poll:+$('poll').value||15, scroll:+$('scroll').value||8, view:$('view').value, apiBase:$('apiBase').value.trim(), token:$('token').value.trim(), rev:cfg?cfg.rev:1
+    poll:+$('poll').value||15, scroll:+$('scroll').value||8, view:$('view').value, hideBar:$('hideBar').checked, apiBase:$('apiBase').value.trim(), token:$('token').value.trim(), rev:cfg?cfg.rev:1
   };
 }
 async function load(){
   try { const r = await fetch('/api/config',{cache:'no-store'}); cfg = await r.json(); localStorage.setItem(LS_KEY, JSON.stringify(cfg)); }
-  catch(e){ try { cfg = JSON.parse(localStorage.getItem(LS_KEY)); } catch(_){} if(!cfg) cfg = {view:'both',hs:{sku:'',demo:true,fields:2},ms:{sku:'',demo:true,fields:2},poll:15,scroll:8,rev:1}; toast('Server unreachable: showing locally saved settings', false); }
+  catch(e){ try { cfg = JSON.parse(localStorage.getItem(LS_KEY)); } catch(_){} if(!cfg) cfg = {view:'double',hs:{sku:'',demo:true,fields:2},ms:{sku:'',demo:true,fields:2},poll:15,scroll:8,rev:1}; toast('Server unreachable: showing locally saved settings', false); }
   fill();
+}
+function applyLock(){
+  const single = $('view').value === 'single';
+  document.querySelectorAll('#ms-card input, #ms-card select, #ms-card button').forEach(el => { el.disabled = single; });
+  $('ms-card').style.opacity = single ? '.45' : '1';
+  $('ms-lock').classList.toggle('hidden', !single);
 }
 async function save(){
   try {
     const r = await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(read())});
-    if(!r.ok) throw new Error('HTTP '+r.status);
+    if(!r.ok){ let m = ''; try { m = (await r.json()).error || ''; } catch(_){} throw new Error('HTTP '+r.status+(m ? ' - '+m : '')); }
     cfg = await r.json(); localStorage.setItem(LS_KEY, JSON.stringify(cfg)); fill();
     toast('Saved. The kiosk picks up changes within a few seconds.');
   } catch(e){ toast('Save failed: '+e.message, false); }
@@ -1256,6 +1295,7 @@ async function cmd(c){
   } catch(e){ toast('Command failed: '+e.message, false); }
 }
 $('save').onclick = save;
+$('view').onchange = applyLock;
 document.querySelectorAll('[data-test]').forEach(b=>b.onclick=()=>test(b.dataset.test));
 document.querySelectorAll('[data-cmd]').forEach(b=>b.onclick=()=>cmd(b.dataset.cmd));
 fetch('/api/sysinfo').then(r=>r.json()).then(s=>{
@@ -1279,7 +1319,7 @@ def main():
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     srv.daemon_threads = True
     ip = local_ip()
-    print("VEX Kiosk running")
+    print("VEX Event Display running")
     print("  Kiosk : http://%s:%d/" % (ip, args.port))
     print("  Admin : http://%s:%d/admin" % (ip, args.port))
     try:
