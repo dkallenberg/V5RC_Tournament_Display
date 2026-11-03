@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-VEX Dual-Division Kiosk (HS + MS) for Raspberry Pi
-===================================================
+VEX Event Display (HS + MS) for Raspberry Pi
+============================================
 Single file. Python 3.8+ standard library only (no pip installs).
+Data comes from the events.vex.com v2 API (needs a bearer token, set in Admin).
 
 Run:      python3 Vex_Event_Display.py                (serves on port 5000)
           sudo python3 Vex_Event_Display.py --port 80 (serves on port 80)
@@ -13,7 +14,7 @@ Chromium kiosk launch (Pi desktop):
   chromium-browser --kiosk --noerrdialogs --disable-infobars \
       --autoplay-policy=no-user-gesture-required http://localhost:5000/
 """
-import argparse, json, os, random, re, socket, threading, time
+import argparse, base64, json, os, random, re, socket, threading, time
 import urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -23,27 +24,19 @@ CONFIG_PATH = os.path.join(HERE, "kiosk_config.json")
 # --------------------------------------------------------------------------
 # Configuration (server-side source of truth; mirrored to localStorage)
 # --------------------------------------------------------------------------
-# NOTE: events.vex.com does not publish a documented public API. The URL
-# templates below are best-effort candidates. Each is tried in order; any
-# JSON (or JSON embedded in a page) that looks like matches / rankings is
-# used. Use Admin > "Test connection" to see which ones respond, and edit the
-# list there if events.vex.com uses different paths. {sku} is substituted.
-DEFAULT_ENDPOINTS = "\n".join([
-    "https://events.vex.com/api/events/{sku}",
-    "https://events.vex.com/api/events/{sku}/matches",
-    "https://events.vex.com/api/events/{sku}/rankings",
-    "https://events.vex.com/events/{sku}",
-    "https://events.vex.com/events/{sku}/matches",
-    "https://events.vex.com/events/{sku}/rankings",
-])
+API_BASE_DEFAULT = "https://events.vex.com/api/v2"
+# Bearer token taken from the working vex_matches.html. Change it any time in Admin > events.vex.com connection.
+DEFAULT_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJhdWQiOiIzIiwianRpIjoiNzMzODkyNTBjNjA3MTg1NGI1YTA4Njg5MDNmYTkwMmM2MjM3YjBkYTQzZmNmODQzOTc0MjA5NmM5MmE3MzcwNGExZmI2ZmE0YWNmZjUyYmYiLCJpYXQiOjE3OTM0MDYzOTIuMzYxMjYwOSwibmJmIjoxNzkzNDA2MzkyLjM2MTI2MywiZXhwIjoyNzQwMTc3NTkyLjM1NjY5MjgsInN1YiI6IjEyMzUzOSIsInNjb3BlcyI6W119.BZpXY1KL9WZHW_O-igw3qa1d4gBhW0efci3RfeCH5eHf_66T1zYQx0uuhBjpmRjFPBaEu2V_8bR0wQs4H7j1cb4oz3_Vwd_zle8VWBcdL7ScjfGL1rF69Mpv8W8Tja1RH6Pe3Hus3RHlf-MN4Kh1osLJSu-kIsKaPpZBIwtFTVPHGK7L5V7d0j9Nr5AHudovAiSYk8Xzl8kM7F1OhkpwrsyBeK59XzaLu5VeKWt0gKtBj444U53YJlMuxqdu7g2mO5ZssXZJHLhBwY1pfXxMu8V-Pt_vvlmNF1YqXpMLx8AhrVhhwlVCnH2VrPsu4xqTKi431Lld3WcQTsJZvQbdZbU5B7gfMTgE0HoWjkTXZDjzJI8mhD8UmQG1DyRpiLmtIL5lBcIyoKntfhR8uvdnlEG1u6LnUN2kaTg6amUAUDMAT5KI7iRd4C-6jIiIIB_Yo3R8D_no-Sqmg3UixFwyqC7W1dRi18X1NYgEMtxEwvPjc1r_0RS3HLy3oHah0-FFj5FpXYu0oZ1SgyZaZYCR5mqiIHwG7kfgYrn5c2SSFLqgzs6eZRTZ8F1qirWBe83oMZYw1wACP3rK4yHXT5aWUPDEprnQBbmBGyU8bgLczJU48SlF9Yxc7G0bEhvXjjKd04iMiuIkLxpalniq-m-aqgII86qNsyjogWECWspRrSo"
 
 DEFAULT_CONFIG = {
-    "hs": {"sku": "", "demo": True, "phase": "auto", "fields": 2},
-    "ms": {"sku": "", "demo": True, "phase": "auto", "fields": 2},
+    "view": "both",    # which tournaments the kiosk shows: both | hs | ms
+    "hs": {"sku": "", "demo": True, "phase": "auto", "fields": 2, "division": ""},
+    "ms": {"sku": "", "demo": True, "phase": "auto", "fields": 2, "division": ""},
     "rankWait": 300,   # seconds to wait after the last qual is scored before showing rankings only
     "poll": 15,
     "scroll": 8,
-    "endpoints": DEFAULT_ENDPOINTS,
+    "apiBase": API_BASE_DEFAULT,
+    "token": DEFAULT_TOKEN,
     "rev": 1,
 }
 
@@ -91,14 +84,17 @@ def sanitize_config(c):
         out[d]["sku"] = str(src.get("sku", "")).strip()[:500]
         out[d]["demo"] = bool(src.get("demo", False))
         out[d]["fields"] = clamp(src.get("fields"), 1, 4, 2)
+        out[d]["division"] = str(src.get("division", "")).strip()[:60]
         ph = str(src.get("phase", "auto"))
         out[d]["phase"] = ph if ph in ("auto", "quals", "rankings", "bracket") else "auto"
     out["rankWait"] = clamp(c.get("rankWait"), 0, 3600, 300)
     out["poll"] = clamp(c.get("poll"), 5, 300, 15)
     out["scroll"] = clamp(c.get("scroll"), 3, 120, 8)
-    ep = str(c.get("endpoints") or DEFAULT_ENDPOINTS)
-    lines = [l.strip() for l in ep.splitlines() if l.strip().startswith("http")]
-    out["endpoints"] = "\n".join(lines) if lines else DEFAULT_ENDPOINTS
+    v = str(c.get("view", "both"))
+    out["view"] = v if v in ("both", "hs", "ms") else "both"
+    base = str(c.get("apiBase") or API_BASE_DEFAULT).strip().rstrip("/")
+    out["apiBase"] = base if base.startswith("http") else API_BASE_DEFAULT
+    out["token"] = str(c.get("token") or DEFAULT_TOKEN).strip()
     out["rev"] = clamp(c.get("rev"), 1, 10**9, 1)
     return out
 
@@ -116,10 +112,12 @@ def save_config(new):
     global CONFIG
     with CFG_LOCK:
         prev_rev = CONFIG.get("rev", 1)
+        new = dict(new)
+        new["token"] = str(new.get("token") or "").strip() or CONFIG.get("token") or DEFAULT_TOKEN  # blank = keep
         merged = sanitize_config(new)
         for d in ("hs", "ms"):
             old_e = CONFIG.get(d, {})
-            if old_e.get("sku") != merged[d]["sku"] or old_e.get("demo") != merged[d]["demo"]:
+            if old_e.get("sku") != merged[d]["sku"] or old_e.get("demo") != merged[d]["demo"] or old_e.get("division") != merged[d]["division"]:
                 STATE[d] = {}     # new event: forget when quals finished
         save_state()
         merged["rev"] = prev_rev + 1
@@ -133,6 +131,28 @@ def save_config(new):
         except OSError as e:
             print("Could not persist config:", e)
     return CONFIG
+
+
+def token_exp(tok):
+    try:
+        part = tok.split(".")[1]
+        part += "=" * (-len(part) % 4)
+        exp = json.loads(base64.urlsafe_b64decode(part)).get("exp")
+        return float(exp) if exp else None
+    except (IndexError, ValueError, TypeError):
+        return None
+
+
+def public_config(cfg):
+    """Config as sent to browsers: the token itself is never exposed, only a hint."""
+    out = {k: v for k, v in cfg.items() if k != "token"}
+    tok = cfg.get("token") or ""
+    exp = token_exp(tok)
+    out["tokenSet"] = bool(tok)
+    out["tokenHint"] = tok[-6:] if tok else ""
+    out["tokenExp"] = time.strftime("%Y-%m-%d", time.gmtime(exp)) if exp else ""
+    out["tokenExpired"] = bool(exp and exp < time.time())
+    return out
 
 
 def local_ip():
@@ -204,35 +224,22 @@ def to_num(v):
         return None
 
 
-def looks_match(d):
-    if not isinstance(d, dict):
-        return False
-    has_id = lk(d, "matchnum", "matchnumber", "number", "name") is not None
-    has_all = (lk(d, "alliances") is not None or lk(d, "red1", "redscore", "red", "redteams") is not None)
-    return has_id and has_all
-
-
-def looks_rank(d):
-    return (isinstance(d, dict) and lk(d, "rank") is not None
-            and team_name(lk(d, "team", "teamnumber", "teamname")) is not None)
-
-
-def is_qual(m):
+def match_kind(m):
+    """'qual', 'elim' or 'skip' (practice / unknown) for one raw API match."""
     rnd = lk(m, "round")
     if isinstance(rnd, bool):
         rnd = None
     if isinstance(rnd, (int, float)):
-        return int(rnd) == 2
-    if isinstance(rnd, str) and rnd.strip():
-        r = rnd.strip().lower()
-        return r.startswith("q") or r == "2"
-    nm = lk(m, "name")
-    if isinstance(nm, str) and nm.strip():
-        n = nm.strip().lower()
-        if n.startswith(("r16", "r32", "r64", "qf", "sf", "f ", "final", "round of", "p ", "practice", "r ")):
-            return False
-        return True
-    return True
+        r = int(rnd)                      # VEX rounds: 1 practice, 2 qual, 3 QF, 4 SF, 5 Final, 6 R16
+        return "skip" if r <= 1 else ("qual" if r == 2 else "elim")
+    nm = str(lk(m, "name") or "").strip().lower()
+    if nm.startswith(("p ", "practice")):
+        return "skip"
+    if nm.startswith("qf"):
+        return "elim"
+    if nm.startswith("q"):
+        return "qual"
+    return "elim" if nm else "qual"
 
 
 def parse_match(m):
@@ -272,10 +279,9 @@ def parse_match(m):
     if num is None:
         return None
     flag = lk(m, "scored", "finished", "completed", "played")
-    if flag is not None:
-        scored = bool(flag) and rs is not None and bs is not None
-    else:
-        scored = rs is not None and bs is not None and (rs + bs) > 0
+    has = rs is not None and bs is not None
+    # scored if the API says so, or if the alliances carry real scores
+    scored = has and (bool(flag) or (rs + bs) > 0)
     fld = lk(m, "field", "fieldname")
     if isinstance(fld, dict):
         fld = lk(fld, "name")
@@ -287,24 +293,6 @@ def parse_match(m):
         "scored": scored,
         "rnd": str(lk(m, "round") or ""), "label": str(lk(m, "name") or ""),
     }
-
-
-def looks_alliance(d):
-    if not isinstance(d, dict) or looks_match(d) or looks_rank(d):
-        return False
-    if lk(d, "color", "score", "wins", "wp", "rank") is not None:
-        return False
-    t = lk(d, "teams")
-    return isinstance(t, list) and 2 <= len(t) <= 3 and lk(d, "number", "alliance", "seed") is not None
-
-
-def parse_alliances(lst):
-    out = []
-    for i, d in enumerate(lst, 1):
-        n = to_num(lk(d, "number", "alliance", "seed")) or i
-        out.append({"n": int(n), "teams": alliance_teams(d)})
-    out.sort(key=lambda a: a["n"])
-    return out
 
 
 ELIM_RE = re.compile(r"\b(R16|QF|SF|FINALS?|F)\b\s*#?\s*(\d+)?(?:\s*-\s*(\d+))?", re.I)
@@ -347,11 +335,6 @@ def assign_slots(elims):
         m["slot"], m["inst"] = r
         if r[0] not in best or r[1] >= best[r[0]]["inst"]:   # later instance (replay) wins
             best[r[0]] = m
-    if unmapped and not best:                               # unknown naming: fall back to scheduled order
-        unmapped.sort(key=lambda m: (m["rnd"], m["inst"], m["num"]))
-        for i, m in enumerate(unmapped[:15], 1):
-            m["slot"] = i
-            best[i] = m
     elims[:] = sorted(best.values(), key=lambda m: m["slot"])
 
 
@@ -365,68 +348,6 @@ def parse_rank(r):
         "wp": to_num(lk(r, "wp")), "ap": to_num(lk(r, "ap")), "sp": to_num(lk(r, "sp")),
         "avg": to_num(lk(r, "averagepoints", "avgscore", "averagescore", "avg", "avgpoints")),
     }
-
-
-def walk_lists(obj, depth=0):
-    if depth > 9:
-        return
-    if isinstance(obj, list):
-        if obj and all(isinstance(x, dict) for x in obj[:5]):
-            yield obj
-        for x in obj[:400]:
-            if isinstance(x, (dict, list)):
-                yield from walk_lists(x, depth + 1)
-    elif isinstance(obj, dict):
-        for v in obj.values():
-            if isinstance(v, (dict, list)):
-                yield from walk_lists(v, depth + 1)
-
-
-def extract_name(raw):
-    if isinstance(raw, dict):
-        ev = lk(raw, "event")
-        for src in (ev, raw):
-            n = lk(src, "eventname", "name", "title") if isinstance(src, dict) else None
-            if isinstance(n, str) and n.strip():
-                return n.strip()
-    return None
-
-
-def parse_payload(raw):
-    """Return dict(matches, rankings, name) found in an arbitrary JSON tree."""
-    best_m, best_r = [], []
-    for lst in walk_lists(raw):
-        head = lst[:5]
-        if sum(looks_match(x) for x in head) >= max(1, len(head) // 2 + 1 if len(head) > 1 else 1):
-            if len(lst) > len(best_m):
-                best_m = lst
-        elif sum(looks_rank(x) for x in head) >= max(1, len(head) // 2 + 1 if len(head) > 1 else 1):
-            if len(lst) > len(best_r):
-                best_r = lst
-    matches, elims = [], []
-    for m in best_m:
-        p = parse_match(m)
-        if p:
-            (matches if is_qual(m) else elims).append(p)
-    rankings = [x for x in (parse_rank(r) for r in best_r) if x["team"]]
-    alliances = []
-    for lst in walk_lists(raw):
-        head = lst[:8]
-        if 2 <= len(lst) <= 16 and all(looks_alliance(x) for x in head):
-            alliances = parse_alliances(lst)
-            break
-    return {"matches": matches, "elims": elims, "alliances": alliances,
-            "rankings": rankings, "name": extract_name(raw)}
-
-
-def embedded_json(html):
-    out = []
-    for m in re.finditer(r"<script[^>]*(?:id=\"__NEXT_DATA__\"|type=\"application/(?:ld\+)?json\")[^>]*>(.*?)</script>", html, re.S | re.I):
-        try:
-            out.append(json.loads(m.group(1)))
-        except ValueError:
-            pass
-    return out
 
 
 def fill_averages(rankings, matches):
@@ -447,87 +368,116 @@ def fill_averages(rankings, matches):
 
 
 # --------------------------------------------------------------------------
-# Fetching from events.vex.com
+# events.vex.com v2 API (bearer token): /events, /events/{id}/divisions/{div}/matches|rankings
 # --------------------------------------------------------------------------
 SKU_RE = re.compile(r"RE-[A-Z0-9]+-\d{2}-\d{4}", re.I)
-UA = "Mozilla/5.0 (X11; Linux armv7l) VexKiosk/1.0"
+UA = "Mozilla/5.0 (X11; Linux armv7l) VexEventDisplay/1.0"
+EVENT_CACHE = {}   # sku -> (time, event object); event id/name/divisions rarely change
+RATE_BLOCK = {}    # division -> time until which API calls pause after an HTTP 429
 
 
-def http_get(url, timeout=8):
+class ApiError(Exception):
+    pass
+
+
+def api_get(base, token, path, diag, timeout=12):
+    url = base.rstrip("/") + path
+    rec = {"url": url, "status": None, "ms": None, "note": ""}
+    diag.append(rec)
     req = urllib.request.Request(url, headers={
-        "User-Agent": UA, "Accept": "application/json,text/html;q=0.9,*/*;q=0.5"})
+        "Authorization": "Bearer " + token, "Accept": "application/json", "User-Agent": UA})
     t0 = time.time()
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        body = r.read(6 * 1024 * 1024).decode("utf-8", "replace")
-        return r.status, body, int((time.time() - t0) * 1000)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read(12 * 1024 * 1024).decode("utf-8", "replace")
+            rec["status"], rec["ms"] = r.status, int((time.time() - t0) * 1000)
+        data = json.loads(body)
+        rec["note"] = "OK"
+        return data
+    except urllib.error.HTTPError as e:
+        rec["status"] = e.code
+        bad = "API token rejected (invalid or expired): paste a fresh token in Admin"
+        rec["note"] = {401: bad, 403: bad, 404: "Not found", 429: "Rate limited by events.vex.com"}.get(e.code, "HTTP %d" % e.code)
+        raise ApiError(rec["note"])
+    except ValueError:
+        rec["note"] = "Response was not valid JSON"
+        raise ApiError(rec["note"])
+    except Exception as e:  # DNS, timeout, SSL, connection reset
+        rec["note"] = "%s: %s" % (type(e).__name__, e)
+        raise ApiError("Could not reach events.vex.com (check the Pi's internet connection)")
 
 
-def candidate_urls(entry, templates):
-    val = entry["sku"].strip()
-    urls = []
-    if val.lower().startswith("http"):
-        urls.append(val)
-    m = SKU_RE.search(val)
-    sku = m.group(0).upper() if m else (val if val and not val.lower().startswith("http") else "")
-    if sku:
-        for t in templates.splitlines():
-            u = t.strip().replace("{sku}", sku)
-            if u and u not in urls:
-                urls.append(u)
-    return sku, urls
+def api_all(base, token, path, diag):
+    rows, page, last = [], 1, 1
+    while page <= last and page <= 20:
+        j = api_get(base, token, "%s%sper_page=250&page=%d" % (path, "&" if "?" in path else "?", page), diag)
+        rows += (j.get("data") or []) if isinstance(j, dict) else []
+        last = int(((j.get("meta") or {}).get("last_page") or 1)) if isinstance(j, dict) else 1
+        page += 1
+    return rows
 
 
-def fetch_live(entry, templates):
-    sku, urls = candidate_urls(entry, templates)
+def pick_division(divs, want):
+    want = str(want or "").strip().lower()
+    if want:
+        for d in divs:
+            if want in (str(d.get("id", "")).lower(), str(d.get("name", "")).lower(), str(d.get("order", "")).lower()):
+                return d
+    return sorted(divs, key=lambda d: d.get("order") if isinstance(d.get("order"), (int, float)) else 0)[0]
+
+
+def fetch_live(entry, cfg):
     diag = []
-    result = {"matches": [], "rankings": [], "name": None, "elims": [], "alliances": []}
-    if not urls:
-        return None, diag, "No event SKU/URL configured"
-    for url in urls:
-        rec = {"url": url, "status": None, "ms": None, "note": ""}
+    m = SKU_RE.search(entry["sku"] or "")
+    if not m:
+        return None, diag, "Enter an event SKU such as RE-V5RC-26-1234"
+    sku = m.group(0).upper()
+    token, base = cfg.get("token") or "", cfg.get("apiBase") or API_BASE_DEFAULT
+    if not token:
+        return None, diag, "No API token set (Admin > events.vex.com connection)"
+    now = time.time()
+    try:
+        hit = EVENT_CACHE.get(sku)
+        if hit and now - hit[0] < 600:
+            evo = hit[1]
+        else:
+            ev = api_get(base, token, "/events?sku[]=" + sku, diag)
+            data = ev.get("data") if isinstance(ev, dict) else None
+            if not data:
+                raise ApiError("No event found for SKU " + sku)
+            evo = data[0]
+            EVENT_CACHE[sku] = (now, evo)
+        divs = evo.get("divisions") or [{"id": 1, "name": "Division 1"}]
+        div = pick_division(divs, entry.get("division"))
+        root = "/events/%s/divisions/%s" % (evo["id"], div["id"])
+        raw_matches = api_all(base, token, root + "/matches", diag)
         try:
-            status, body, ms = http_get(url)
-            rec["status"], rec["ms"] = status, ms
-            payloads = []
-            try:
-                payloads.append(json.loads(body))
-            except ValueError:
-                payloads.extend(embedded_json(body))
-                tm = re.search(r"<title>(.*?)</title>", body, re.S | re.I)
-                if tm and not result["name"]:
-                    result["name"] = re.sub(r"\s+", " ", tm.group(1)).strip().split(" | ")[0]
-            found = []
-            for p in payloads:
-                part = parse_payload(p)
-                if part["matches"] and not result["matches"]:
-                    result["matches"] = part["matches"]; found.append("%d matches" % len(part["matches"]))
-                if part["rankings"] and not result["rankings"]:
-                    result["rankings"] = part["rankings"]; found.append("%d rankings" % len(part["rankings"]))
-                if part["elims"] and not result["elims"]:
-                    result["elims"] = part["elims"]; found.append("%d elim matches" % len(part["elims"]))
-                if part["alliances"] and not result["alliances"]:
-                    result["alliances"] = part["alliances"]; found.append("%d alliances" % len(part["alliances"]))
-                if part["name"] and not result["name"]:
-                    result["name"] = part["name"]; found.append("name")
-            rec["note"] = ", ".join(found) if found else "responded, no usable data recognised"
-        except urllib.error.HTTPError as e:
-            rec["status"], rec["note"] = e.code, "HTTP %d" % e.code
-        except Exception as e:  # network, DNS, timeout, SSL
-            rec["note"] = "%s: %s" % (type(e).__name__, e)
-        diag.append(rec)
-        if result["matches"] and result["rankings"] and result["name"]:
-            break
-    if not result["matches"] and not result["rankings"]:
-        if all(d["status"] is None for d in diag):
-            return None, diag, "Could not reach events.vex.com (check the Pi's internet connection)"
-        return None, diag, "events.vex.com responded, but no recognisable match/ranking data was found (see diagnostics)"
-    result["matches"].sort(key=lambda m: (m["num"], m["inst"]))
-    assign_slots(result["elims"])
-    result["rankings"].sort(key=lambda r: r["rank"] or 9999)
-    fill_averages(result["rankings"], result["matches"])
-    result["name"] = result["name"] or sku
-    result["sku"] = sku
-    return result, diag, ""
+            raw_ranks = api_all(base, token, root + "/rankings", diag)
+        except ApiError:
+            if diag and diag[-1]["status"] == 404:
+                raw_ranks = []          # rankings not published yet
+            else:
+                raise
+    except ApiError as e:
+        return None, diag, str(e)
+    except (KeyError, TypeError, AttributeError) as e:
+        return None, diag, "Unexpected response shape from events.vex.com (%s)" % e
+    quals, elims = [], []
+    for rm in raw_matches:
+        kind = match_kind(rm)
+        if kind == "skip":
+            continue
+        pm = parse_match(rm)
+        if pm:
+            (quals if kind == "qual" else elims).append(pm)
+    rankings = [x for x in (parse_rank(r) for r in raw_ranks) if x["team"]]
+    quals.sort(key=lambda x: (x["num"], x["inst"]))
+    rankings.sort(key=lambda r: r["rank"] or 9999)
+    assign_slots(elims)
+    fill_averages(rankings, quals)
+    return {"name": evo.get("name") or sku, "sku": sku, "matches": quals, "elims": elims, "alliances": [],
+            "rankings": rankings, "divisions": [{"id": d.get("id"), "name": d.get("name", "")} for d in divs],
+            "division": div.get("name") or div.get("id")}, diag, ""
 
 
 # --------------------------------------------------------------------------
@@ -652,7 +602,12 @@ def get_division(div, force=False):
     if entry["demo"]:
         res = demo_data(div)
     else:
-        res, diag, err = fetch_live(entry, cfg["endpoints"])
+        if RATE_BLOCK.get(div, 0) > now:
+            res, err = None, "Rate limited by events.vex.com; retrying shortly"
+        else:
+            res, diag, err = fetch_live(entry, cfg)
+            if "Rate limited" in err:
+                RATE_BLOCK[div] = now + 60
     if res:
         out = dict(res)
         out.update({"online": True, "error": "", "fetchedAt": int(now), "stale": False, "demo": entry["demo"]})
@@ -710,7 +665,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, ADMIN_HTML, "text/html; charset=utf-8")
             elif path == "/api/config":
                 with CFG_LOCK:
-                    self._json(CONFIG)
+                    self._json(public_config(CONFIG))
             elif path == "/api/sysinfo":
                 self._json({"ip": local_ip(), "port": self.server.server_address[1], "time": int(time.time())})
             elif path == "/api/command":
@@ -725,7 +680,8 @@ class Handler(BaseHTTPRequestHandler):
                     "matches": len(d["matches"]), "scored": sum(1 for m in d["matches"] if m["scored"]),
                     "teams": len(d["rankings"]), "phase": d.get("phase"),
                     "rankingsIn": d.get("rankingsIn"), "elims": len(d.get("elims", [])),
-                    "alliances": len(d.get("alliances", [])), "top": d["rankings"][:5],
+                    "alliances": len(d.get("alliances", [])), "divisions": d.get("divisions", []),
+                    "division": d.get("division"), "top": d["rankings"][:5],
                     "next": [m for m in d["matches"] if not m["scored"]][:3], "diag": d["diag"]})
             elif path == "/favicon.ico":
                 self._send(204, b"", "image/x-icon")
@@ -740,7 +696,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0].rstrip("/")
         try:
             if path == "/api/config":
-                self._json(save_config(self._body()))
+                self._json(public_config(save_config(self._body())))
             elif path == "/api/command":
                 cmd = str(self._body().get("cmd", ""))
                 if cmd not in ("refresh", "nextpage", "reload", "clearcache"):
@@ -836,6 +792,10 @@ td.avg{color:var(--green)}
 .matches.dense .row1{font-size:1.1rem}
 .matches.dense .alli{font-size:1.4rem}
 .matches.dense .alli .score{font-size:1.8rem}
+#panes.single .bl{font-size:1.5rem}
+#panes.single .ctitle{font-size:1.3rem}
+#panes.single .bh{font-size:1.15rem}
+#panes.single .sd{font-size:1.2rem;flex-basis:2rem}
 /* phases: quals (default) | rankings (rankings only) | bracket */
 .bracket{display:none;min-height:0;min-width:0;padding:.7rem .8rem;grid-template-columns:repeat(6,1fr);grid-template-rows:auto repeat(8,minmax(0,1fr));column-gap:0;row-gap:.3rem}
 .pane.ph-bracket .bracket{display:grid}
@@ -892,7 +852,7 @@ document.getElementById('gear').innerHTML = icon('settings');
 
 /* ---------- config (server is source of truth; localStorage is the offline mirror) ---------- */
 const LS_KEY = 'vexKioskCfg';
-const DEFAULT_CFG = {hs:{sku:'',demo:true},ms:{sku:'',demo:true},poll:15,scroll:8,rev:0};
+const DEFAULT_CFG = {view:'both',hs:{sku:'',demo:true,fields:2},ms:{sku:'',demo:true,fields:2},poll:15,scroll:8,rev:0};
 let cfg = (function(){ try { return Object.assign({}, DEFAULT_CFG, JSON.parse(localStorage.getItem(LS_KEY)||'{}')); } catch(e){ return Object.assign({}, DEFAULT_CFG); } })();
 function saveLocal(){ try { localStorage.setItem(LS_KEY, JSON.stringify(cfg)); } catch(e){} }
 
@@ -965,6 +925,7 @@ function renderMatches(div){
 }
 
 function renderRanks(div){
+  if (!visible(div)) return;
   const d = S[div].data, wrap = document.getElementById('rw-'+div), pi = document.getElementById('pi-'+div);
   if (!d || !d.rankings.length){ wrap.innerHTML='<div class="empty">'+(d? 'No rankings published yet':'Waiting for data…')+'</div>'; pi.textContent=''; return; }
   const size = pageSize(div), pages = Math.max(1, Math.ceil(d.rankings.length/size)), p = page % pages;
@@ -981,8 +942,15 @@ function renderHeader(div){
   document.getElementById('b-'+div).innerHTML = '<span class="div">'+div.toUpperCase()+':</span> '+esc(name);
   renderStatus(div);
 }
-function renderDiv(d){ applyPhase(d); renderHeader(d); renderMatches(d); renderBracket(d); renderRanks(d); }
-function renderAll(){ ['hs','ms'].forEach(renderDiv); renderFoot(); }
+function visible(div){ const v = cfg.view || 'both'; return v==='both' || v===div; }
+function applyView(){
+  const v = cfg.view || 'both', pn = document.getElementById('panes');
+  ['hs','ms'].forEach(d=>{ document.getElementById('pane-'+d).style.display = visible(d) ? '' : 'none'; });
+  pn.style.gridTemplateColumns = v==='both' ? '1fr 1fr' : '1fr';
+  pn.classList.toggle('single', v!=='both');
+}
+function renderDiv(d){ if (!visible(d)) return; applyPhase(d); renderHeader(d); renderMatches(d); renderBracket(d); renderRanks(d); }
+function renderAll(){ applyView(); ['hs','ms'].forEach(renderDiv); renderFoot(); }
 
 function renderFoot(){
   document.getElementById('f-ip').textContent = ip;
@@ -1048,6 +1016,7 @@ async function fetchJson(url, ms){
 }
 async function poll(div){
   const s = S[div]; clearTimeout(s.timer);
+  if (!visible(div)) return;
   try {
     const d = await fetchJson('/api/data/'+div, 12000);
     s.data = d; s.fails = d.online ? 0 : Math.min(s.fails+1, 2);
@@ -1149,11 +1118,18 @@ ADMIN_HTML = r"""<!DOCTYPE html>
 
   <div id="toast" class="hidden card text-sm"></div>
 
+  <section class="card space-y-2">
+    <h2 class="font-bold text-lg">Tournaments shown on the kiosk</h2>
+    <select id="view"><option value="both">Both: HS (left) and MS (right)</option><option value="hs">High School only (full screen)</option><option value="ms">Middle School only (full screen)</option></select>
+    <p class="text-xs" style="color:#8da2ba">Only the tournament(s) shown are polled from events.vex.com.</p>
+  </section>
+
   <section class="grid md:grid-cols-2 gap-6">
     <div class="card space-y-3">
       <h2 class="font-bold text-lg">High School event</h2>
       <div><label for="hs-sku">Event SKU or events.vex.com URL</label><input type="text" id="hs-sku" placeholder="RE-V5RC-XX-XXXX"></div>
       <label class="flex items-center gap-2" style="color:#eef3f9"><input type="checkbox" id="hs-demo"> Use demo data (no internet needed)</label>
+      <div><label for="hs-div">Division (optional: id or name, blank = first division of the event)</label><input type="text" id="hs-div"></div>
       <div><label for="hs-fields">Number of fields (1-4): matches on the fields now / queuing</label><input type="number" id="hs-fields" min="1" max="4"></div>
       <div><label for="hs-phase">Display mode</label><select id="hs-phase"><option value="auto">Automatic (quals, then rankings, then bracket)</option><option value="quals">Always show qualification matches</option><option value="rankings">Always show rankings only</option><option value="bracket">Always show bracket</option></select></div>
       <div class="flex gap-2"><button class="btn" data-test="hs"><span data-i="activity"></span>Test HS connection</button></div>
@@ -1162,6 +1138,7 @@ ADMIN_HTML = r"""<!DOCTYPE html>
       <h2 class="font-bold text-lg">Middle School event</h2>
       <div><label for="ms-sku">Event SKU or events.vex.com URL</label><input type="text" id="ms-sku" placeholder="RE-V5RC-XX-XXXX"></div>
       <label class="flex items-center gap-2" style="color:#eef3f9"><input type="checkbox" id="ms-demo"> Use demo data (no internet needed)</label>
+      <div><label for="ms-div">Division (optional: id or name, blank = first division of the event)</label><input type="text" id="ms-div"></div>
       <div><label for="ms-fields">Number of fields (1-4): matches on the fields now / queuing</label><input type="number" id="ms-fields" min="1" max="4"></div>
       <div><label for="ms-phase">Display mode</label><select id="ms-phase"><option value="auto">Automatic (quals, then rankings, then bracket)</option><option value="quals">Always show qualification matches</option><option value="rankings">Always show rankings only</option><option value="bracket">Always show bracket</option></select></div>
       <div class="flex gap-2"><button class="btn" data-test="ms"><span data-i="activity"></span>Test MS connection</button></div>
@@ -1174,10 +1151,12 @@ ADMIN_HTML = r"""<!DOCTYPE html>
     <div><label for="rankWait">Wait after last qual is scored before showing rankings only (seconds, default 300)</label><input type="number" id="rankWait" min="0" max="3600"></div>
   </section>
 
-  <section class="card space-y-2">
-    <h2 class="font-bold text-lg">events.vex.com endpoint templates</h2>
-    <p class="text-sm" style="color:#8da2ba">One URL per line; <code>{sku}</code> is replaced with the event SKU. Each is tried in order and any JSON (or JSON embedded in the page) containing matches or rankings is used. events.vex.com has no documented public API, so these defaults are best guesses: run a connection test, check the results below, and edit this list to match whatever paths respond with data.</p>
-    <textarea id="endpoints" rows="6" spellcheck="false" class="font-mono text-sm"></textarea>
+  <section class="card space-y-3">
+    <h2 class="font-bold text-lg">events.vex.com connection</h2>
+    <div><label for="token">API bearer token</label><input type="password" id="token" autocomplete="off" placeholder="leave blank to keep the saved token">
+      <p id="token-hint" class="text-xs mt-1" style="color:#8da2ba"></p></div>
+    <div><label for="apiBase">API base URL</label><input type="text" id="apiBase"></div>
+    <p class="text-xs" style="color:#8da2ba">Each tournament makes 2 requests per poll (matches + rankings). Intervals under 15 s on both tournaments may hit rate limits; the kiosk pauses and keeps showing the last data if that happens.</p>
   </section>
 
   <section class="card space-y-3">
@@ -1219,22 +1198,24 @@ function toast(msg, ok){
   clearTimeout(toast.t); toast.t = setTimeout(()=>t.classList.add('hidden'), 4000);
 }
 function fill(){
-  $('hs-sku').value = cfg.hs.sku; $('hs-demo').checked = !!cfg.hs.demo; $('hs-phase').value = cfg.hs.phase || 'auto'; $('hs-fields').value = cfg.hs.fields || 2;
-  $('ms-sku').value = cfg.ms.sku; $('ms-demo').checked = !!cfg.ms.demo; $('ms-phase').value = cfg.ms.phase || 'auto'; $('ms-fields').value = cfg.ms.fields || 2;
+  $('hs-sku').value = cfg.hs.sku; $('hs-demo').checked = !!cfg.hs.demo; $('hs-div').value = cfg.hs.division || ''; $('hs-phase').value = cfg.hs.phase || 'auto'; $('hs-fields').value = cfg.hs.fields || 2;
+  $('ms-sku').value = cfg.ms.sku; $('ms-demo').checked = !!cfg.ms.demo; $('ms-div').value = cfg.ms.division || ''; $('ms-phase').value = cfg.ms.phase || 'auto'; $('ms-fields').value = cfg.ms.fields || 2;
   $('rankWait').value = cfg.rankWait == null ? 300 : cfg.rankWait;
-  $('poll').value = cfg.poll; $('scroll').value = cfg.scroll; $('endpoints').value = cfg.endpoints || '';
+  $('poll').value = cfg.poll; $('scroll').value = cfg.scroll;
+  $('view').value = cfg.view || 'both'; $('apiBase').value = cfg.apiBase || ''; $('token').value = '';
+  $('token-hint').textContent = cfg.tokenSet ? ('A token is saved (ends ' + cfg.tokenHint + ')' + (cfg.tokenExpired ? ', EXPIRED' : cfg.tokenExp ? ', valid until ' + cfg.tokenExp : '') + '. Paste a new one here only to replace it.') : 'No token saved yet.';
 }
 function read(){
   return {
-    hs:{sku:$('hs-sku').value.trim(), demo:$('hs-demo').checked, phase:$('hs-phase').value, fields:+$('hs-fields').value||2},
-    ms:{sku:$('ms-sku').value.trim(), demo:$('ms-demo').checked, phase:$('ms-phase').value, fields:+$('ms-fields').value||2},
+    hs:{sku:$('hs-sku').value.trim(), demo:$('hs-demo').checked, phase:$('hs-phase').value, division:$('hs-div').value.trim(), fields:+$('hs-fields').value||2},
+    ms:{sku:$('ms-sku').value.trim(), demo:$('ms-demo').checked, phase:$('ms-phase').value, division:$('ms-div').value.trim(), fields:+$('ms-fields').value||2},
     rankWait: $('rankWait').value === '' ? 300 : +$('rankWait').value,
-    poll:+$('poll').value||15, scroll:+$('scroll').value||8, endpoints:$('endpoints').value, rev:cfg?cfg.rev:1
+    poll:+$('poll').value||15, scroll:+$('scroll').value||8, view:$('view').value, apiBase:$('apiBase').value.trim(), token:$('token').value.trim(), rev:cfg?cfg.rev:1
   };
 }
 async function load(){
   try { const r = await fetch('/api/config',{cache:'no-store'}); cfg = await r.json(); localStorage.setItem(LS_KEY, JSON.stringify(cfg)); }
-  catch(e){ try { cfg = JSON.parse(localStorage.getItem(LS_KEY)); } catch(_){} if(!cfg) cfg = {hs:{sku:'',demo:true},ms:{sku:'',demo:true},poll:15,scroll:8,endpoints:'',rev:1}; toast('Server unreachable: showing locally saved settings', false); }
+  catch(e){ try { cfg = JSON.parse(localStorage.getItem(LS_KEY)); } catch(_){} if(!cfg) cfg = {view:'both',hs:{sku:'',demo:true,fields:2},ms:{sku:'',demo:true,fields:2},poll:15,scroll:8,rev:1}; toast('Server unreachable: showing locally saved settings', false); }
   fill();
 }
 async function save(){
@@ -1255,7 +1236,8 @@ async function test(div){
     const nxt = (d.next||[]).map(m=>'Q'+m.num+' '+esc(m.red.join('/'))+' vs '+esc(m.blue.join('/'))).join('; ') || 'none';
     $('preview').innerHTML =
       '<div class="'+(d.ok?'ok':'bad')+' font-semibold">'+div.toUpperCase()+': '+(d.ok?'DATA STREAM OK':'NO DATA')+(d.demo?' (demo)':'')+'</div>'+
-      '<div>Event: <b style="color:#eef3f9">'+esc(d.name)+'</b></div>'+
+      '<div>Event: <b style="color:#eef3f9">'+esc(d.name)+'</b>'+(d.division?' &middot; Division: '+esc(d.division):'')+'</div>'+
+      (d.divisions&&d.divisions.length>1 ? '<div>Divisions in this event: '+d.divisions.map(x=>esc(x.name||x.id)+' (id '+esc(x.id)+')').join(', ')+'</div>' : '')+
       '<div>Qualification matches: '+d.matches+' ('+d.scored+' scored) &middot; Teams ranked: '+d.teams+'</div>'+
       '<div>Display phase: <b style="color:#eef3f9">'+esc(d.phase)+'</b>'+(d.rankingsIn!=null&&d.phase==='quals'?' (rankings-only in '+d.rankingsIn+'s)':'')+' &middot; Elimination matches: '+d.elims+' &middot; Alliances found: '+d.alliances+'</div>'+
       '<div>Top 5: '+top+'</div><div>Next up: '+nxt+'</div>'+(d.error?'<div class="bad">'+esc(d.error)+'</div>':'');
