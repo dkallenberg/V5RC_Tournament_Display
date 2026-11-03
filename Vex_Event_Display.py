@@ -850,7 +850,7 @@ td.avg{color:var(--green)}
 .bl .bt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .bl .bt.ph{font-weight:600;font-style:italic;opacity:.5}
 .bl.win .bs{color:#fff}
-.bl.lose{opacity:.45}
+.bl.win{margin:0 -.35rem;padding:0 .65rem}   /* winner's block runs the full width of the card */
 .bcell.fin .bm{flex:0 1 auto;max-height:none;padding:.35rem .45rem}
 #foot{flex:0 0 auto;display:none;justify-content:space-between;align-items:center;gap:1.5rem;padding:.55rem 1.4rem;background:#070a0f;border-top:.14rem solid var(--line);font-size:1.3rem;font-weight:700;color:var(--dim);white-space:nowrap}
 #foot b{color:var(--text)}
@@ -1031,16 +1031,19 @@ function renderBracket(div){
   for (let s=1; s<=8; s++){ const m = by[s]; if (m){ if (m.red.length) seedOf[m.red.join(' ')] = SEED[s][0]; if (m.blue.length) seedOf[m.blue.join(' ')] = SEED[s][1]; } }
   Object.keys(al).forEach(n=>{ if (al[n] && al[n].length) seedOf[al[n].join(' ')] = +n; });
   /* red side = first feeder, blue side = second feeder (matches VEX's own bracket).
-     Winners are never copied forward: the Round of 16 shows its alliances from the start, and every later block
-     stays a placeholder until its own match has been scored. */
+     The moment a match is scored its winner appears in the next round's block. */
   function side(slot, i){
     const m = by[slot]; let seed = null, teams = null, ph = '';
-    if (slot<=8){ seed = SEED[slot][i]; ph = 'ALLIANCE '+seed; } else { ph = 'W '+slotName(FEED[slot][i]); }
+    if (slot<=8){ seed = SEED[slot][i]; ph = 'ALLIANCE '+seed; if (al[seed] && al[seed].length) teams = al[seed]; }
+    else { const f = FEED[slot][i]; ph = 'W '+slotName(f); const w = winner(f); if (w){ seed = w.seed; teams = w.teams; } }
     const own = m ? (i ? m.blue : m.red) : null;
-    if (own && own.length && (slot<=8 || m.scored)) teams = own;
-    else if (slot<=8 && al[seed] && al[seed].length) teams = al[seed];
+    if (own && own.length) teams = own;
     if (teams && seed===null && seedOf[teams.join(' ')] !== undefined) seed = seedOf[teams.join(' ')];
     return {seed:seed, teams:teams, ph:ph};
+  }
+  function winner(slot){
+    const m = by[slot]; if (!m || !m.scored || m.rs===m.bs) return null;
+    return side(slot, m.rs>m.bs ? 0 : 1);
   }
   const line = (cls,x,score,win,lose) => '<div class="bl '+cls+(win?' win':'')+(lose?' lose':'')+'"><span class="sd num">'+(x.seed==null?'':x.seed)+'</span><span class="bt'+(x.teams?'':' ph')+'">'+esc(x.teams?x.teams.join(' '):x.ph)+'</span><span class="bs num">'+(score==null?'':score)+'</span></div>';
   function card(slot){
