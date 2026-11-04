@@ -31,8 +31,8 @@ DEFAULT_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJhdWQiOiIzIiwianRpIjoiNz
 
 DEFAULT_CONFIG = {
     "view": "single",  # single = one tournament full screen (HS settings) | double = HS left + MS right
-    "hs": {"sku": "", "demo": False, "phase": "auto", "fields": 2, "division": ""},
-    "ms": {"sku": "", "demo": False, "phase": "auto", "fields": 2, "division": ""},
+    "hs": {"sku": "", "demo": False, "phase": "auto", "fields": 3, "division": "", "lunchAfter": 0, "lunchMins": 0, "lunchResume": ""},
+    "ms": {"sku": "", "demo": False, "phase": "auto", "fields": 2, "division": "", "lunchAfter": 0, "lunchMins": 0, "lunchResume": ""},
     "rankWait": 300,   # seconds to wait after the last qual is scored before showing rankings only
     "poll": 15,
     "scroll": 8,
@@ -86,8 +86,12 @@ def sanitize_config(c):
         src = c.get(d, {}) if isinstance(c.get(d), dict) else {}
         out[d]["sku"] = str(src.get("sku", "")).strip()[:500]
         out[d]["demo"] = bool(src.get("demo", False))
-        out[d]["fields"] = clamp(src.get("fields"), 1, 4, 2)
+        out[d]["fields"] = clamp(src.get("fields"), 1, 4, 3 if d == "hs" else 2)
         out[d]["division"] = str(src.get("division", "")).strip()[:60]
+        out[d]["lunchAfter"] = clamp(src.get("lunchAfter"), 0, 999, 0)       # lunch break after this Q (0 = none)
+        out[d]["lunchMins"] = clamp(src.get("lunchMins"), 0, 600, 0)         # ... lasting this many minutes
+        rs = str(src.get("lunchResume", "")).strip()                          # ... or until this clock time (HH:MM)
+        out[d]["lunchResume"] = rs if re.match(r"^\d{1,2}:\d{2}$", rs) else ""
         ph = str(src.get("phase", "auto"))
         out[d]["phase"] = ph if ph in ("auto", "quals", "rankings", "bracket") else "auto"
     out["rankWait"] = clamp(c.get("rankWait"), 0, 3600, 300)
@@ -531,7 +535,9 @@ def sim_bracket(alliances, nscored, rnd):
 
 # Demo timeline (seconds): quals advance 1 match / 3 s; 15 s on the final rankings (alliance selection);
 # bracket shown for 5 s; then 1 bracket match / 3 s; 15 s hold on the finished bracket; then it starts over.
-DEMO_QUAL_END = 3 * (60 - 2)
+DEMO_LUNCH_AFTER = 30    # demo lunch break after Q30, lasting 45 s (rankings 20 s, large queue cards 20 s, 5 s normal)
+DEMO_LUNCH_LEN = 45
+DEMO_QUAL_END = 3 * (60 - 2) + DEMO_LUNCH_LEN
 DEMO_CYCLE = DEMO_QUAL_END + 15 + 5 + 3 * 15 + 15
 
 
@@ -540,14 +546,20 @@ def demo_data(div, now):
     rnd = random.Random(7 if div == "hs" else 11)
     n_teams = 50 if div == "hs" else 32
     teams = ["%d%s" % (1000 + i * 41 + (0 if div == "hs" else 9000), "ABCDEFG"[i % 7]) for i in range(n_teams)]
-    fields = ["Field 1", "Field 2", "Field 3"] if div == "hs" else ["RED 1", "BLUE 1", "RED 2", "BLUE 2"]
+    fields = ["Field 1", "Field 2", "Field 3"] if div == "hs" else ["Field 1", "Field 2"]
     matches = []
     for n in range(1, 61):
         four = rnd.sample(teams, 4)
         matches.append({"num": n, "inst": 1, "field": fields[(n - 1) % len(fields)], "red": four[:2], "blue": four[2:],
                         "_rs": rnd.randint(18, 96), "_bs": rnd.randint(18, 96)})
     clock = (now - DEMO_START.get(div, SERVER_START)) % DEMO_CYCLE
-    done = 60 if clock >= DEMO_QUAL_END else min(60, 2 + int(clock // 3))
+    lunch_at = 3 * (DEMO_LUNCH_AFTER - 2)                  # when the last match before lunch is scored
+    if clock < lunch_at:
+        done = 2 + int(clock // 3)
+    elif clock < lunch_at + DEMO_LUNCH_LEN:
+        done = DEMO_LUNCH_AFTER                            # lunch break: no matches scored
+    else:
+        done = min(60, DEMO_LUNCH_AFTER + int((clock - lunch_at - DEMO_LUNCH_LEN) // 3))
     for m in matches:
         sc = m["num"] <= done
         rs, bs = m.pop("_rs"), m.pop("_bs")
@@ -579,12 +591,54 @@ def demo_data(div, now):
         elims = sim_bracket(alliances, 0 if since < 0 else min(15, int(since // 3) + 1), random.Random(5))
     name = "Demo %s Championship" % ("High School" if div == "hs" else "Middle School")
     return {"name": name, "sku": "DEMO", "matches": matches, "rankings": rankings,
-            "elims": elims, "alliances": alliances, "fields": 3 if div == "hs" else None}   # HS demo runs 3 fields
+            "elims": elims, "alliances": alliances, "fields": 3 if div == "hs" else 2}   # HS demo runs 3 fields, MS demo 2
 
 
 # --------------------------------------------------------------------------
 # Division data service with cache + last-good fallback
 # --------------------------------------------------------------------------
+def lunch_end(entry, start):
+    """When play resumes: the 'resume at' clock time if given, otherwise start + the break length."""
+    mm = re.match(r"^(\d{1,2}):(\d{2})$", str(entry.get("lunchResume") or ""))
+    if mm and int(mm.group(1)) < 24 and int(mm.group(2)) < 60:
+        dt = datetime.datetime.fromtimestamp(start).replace(hour=int(mm.group(1)), minute=int(mm.group(2)), second=0, microsecond=0)
+        return dt.timestamp()
+    return start + 60 * int(entry.get("lunchMins") or 0)
+
+
+def lunch_state(div, entry, out, now):
+    """None, or {"state": "rank" | "queue", "end": epoch} while a lunch break is under way.
+    The break starts when the chosen Q is scored. Until 5 min before it ends: rankings only. From 5 min until
+    30 s before: large NOW QUEUING cards. Then the normal screen (those matches are on the fields)."""
+    demo = bool(entry.get("demo"))
+    la = DEMO_LUNCH_AFTER if demo else int(entry.get("lunchAfter") or 0)
+    if la <= 0:
+        return None
+    quals = out.get("matches") or []
+    at = next((m for m in quals if m["num"] == la), None)
+    st = STATE.setdefault(div, {})
+    resumed = any(m["scored"] for m in quals if m["num"] > la)
+    if not (at and at["scored"]) or resumed:           # break point not reached yet, or play has already resumed
+        if st.get("lunch_start") and not (at and at["scored"]):
+            st["lunch_start"] = 0
+            save_state()
+        return None
+    if not st.get("lunch_start"):
+        st["lunch_start"] = now
+        save_state()
+    start = st["lunch_start"]
+    end = start + DEMO_LUNCH_LEN if demo else lunch_end(entry, start)
+    left = end - now
+    if end <= start or left <= 0:
+        return None
+    t_rank, t_queue = (25, 5) if demo else (300, 30)
+    if left > t_rank:
+        return {"state": "rank", "end": end}
+    if left > t_queue:
+        return {"state": "queue", "end": end}
+    return None
+
+
 def compute_phase(div, entry, out, wait, now):
     """Returns (phase, seconds_until_rankings). phase: quals | rankings | bracket."""
     quals = out.get("matches") or []
@@ -609,6 +663,10 @@ def compute_phase(div, entry, out, wait, now):
         ph = "rankings"
     else:
         ph = "quals"
+        lu = lunch_state(div, entry, out, now)
+        if lu:
+            ph = "lunch_" + lu["state"]
+            out["lunchEnd"] = lu["end"]
     return ph, left
 
 
@@ -817,13 +875,9 @@ td.avg{color:var(--green)}
 .queue-sec{background:var(--gold);border-radius:.7rem;padding:.35rem .5rem}
 .queue-title{color:#1a1300}
 .card.queuing{border-color:#1a1300}
-/* the first NOW QUEUING card flashes red/blue like police lights; the team numbers and bars stay steady */
-.card.police{animation:police .8s linear infinite}
-@keyframes police{
-  0%,49%{border-color:#ff2d45;background:#3a1218;box-shadow:inset 0 0 0 .15rem #ff2d45,0 0 1.8rem .2rem rgba(255,45,69,.9)}
-  50%,100%{border-color:#2f7bff;background:#101f3d;box-shadow:inset 0 0 0 .15rem #2f7bff,0 0 1.8rem .2rem rgba(47,123,255,.9)}
-}
-@media (prefers-reduced-motion:reduce){.card.police{animation:none}}
+/* the first NOW QUEUING card is steady but brighter than every other match card */
+.card.first{background:#46607f;border-color:#fff;box-shadow:0 0 1.2rem rgba(255,255,255,.6)}
+.card.first .field{color:#fff}
 .matches.dense{gap:.35rem}
 .matches.dense .card{padding:.15rem .6rem;gap:.1rem}
 .matches.dense .qbadge{font-size:1.05rem}
@@ -853,6 +907,17 @@ td.avg{color:var(--green)}
 #panes.single .ctitle{font-size:1.3rem}
 #panes.single .bh{font-size:1.15rem}
 #panes.single .sd{font-size:1.2rem;flex-basis:2rem}
+.lunchq{display:none;flex:1;min-height:0;flex-direction:column;gap:1rem;background:var(--gold);margin:.8rem;border-radius:.8rem;padding:1rem 1.3rem}
+.pane.ph-lunchq .pbody{display:none}
+.pane.ph-lunchq .lunchq{display:flex}
+.lq-head{display:flex;justify-content:space-between;align-items:baseline;gap:1rem;color:#1a1300}
+.lq-title{font-weight:800;font-size:3.6rem;letter-spacing:.04em}
+.lq-sub{font-weight:800;font-size:2.2rem}
+.lq-cards{flex:1;min-height:0;display:grid;gap:1.1rem}
+.lq-cards .card{padding:.8rem 1.2rem;gap:.7rem}
+.lq-cards .qbadge{font-size:3rem;padding:0 1rem}
+.lq-cards .row1{font-size:2.4rem}
+.lq-cards .card .bl{font-size:3.4rem;padding:.2rem 1rem}
 .msgbox{display:none;flex:1;min-height:0;flex-direction:column;align-items:center;justify-content:center;gap:1.4rem;text-align:center;padding:2rem}
 .pane.ph-msg .pbody{display:none}
 .pane.ph-msg .msgbox{display:flex}
@@ -911,7 +976,7 @@ document.getElementById('gear').innerHTML = icon('settings');
 
 /* ---------- config (server is source of truth; localStorage is the offline mirror) ---------- */
 const LS_KEY = 'vexKioskCfg';
-const DEFAULT_CFG = {view:'single',hs:{sku:'',demo:false,fields:2},ms:{sku:'',demo:false,fields:2},poll:15,scroll:8,rev:0};
+const DEFAULT_CFG = {view:'single',hs:{sku:'',demo:false,fields:3},ms:{sku:'',demo:false,fields:2},poll:15,scroll:8,rev:0};
 let cfg = (function(){ try { return Object.assign({}, DEFAULT_CFG, JSON.parse(localStorage.getItem(LS_KEY)||'{}')); } catch(e){ return Object.assign({}, DEFAULT_CFG); } })();
 function saveLocal(){ try { localStorage.setItem(LS_KEY, JSON.stringify(cfg)); } catch(e){} }
 
@@ -933,7 +998,8 @@ function buildPane(div){
       '</div>'+
       '<div class="bracket" id="bk-'+div+'"></div>'+
     '</div>'+
-    '<div class="msgbox" id="mg-'+div+'"></div>';
+    '<div class="msgbox" id="mg-'+div+'"></div>'+
+    '<div class="lunchq" id="lq-'+div+'"></div>';
 }
 
 /* ---------- renderers ---------- */
@@ -944,10 +1010,10 @@ function teamsHtml(a, cls){ return a.map(t=>'<span'+(cls?' class="'+cls+'"':'')+
 function bar(cls, teams, score, win){
   return '<div class="bl '+cls+(win?' win':'')+'"><span class="bt">'+teamsHtml(teams)+'</span><span class="bs num">'+(score==null?'':score)+'</span></div>';
 }
-function matchCard(m, mode){   /* mode: 'scored' | 'field' | 'queue' | 'first' (first queuing card flashes like police lights) */
+function matchCard(m, mode){   /* mode: 'scored' | 'field' | 'queue' | 'first' (first queuing card is shown brighter) */
   const sc = !!m.scored, rw = sc && m.rs>m.bs, bw = sc && m.bs>m.rs;
-  const cls = mode==='first' ? ' queuing police' : mode==='queue' ? ' queuing' : '';
-  return '<div class="card'+cls+'"><div class="row1"><span class="qbadge num">Q '+m.num+'</span>'+((!sc && m.field)?'<span class="field">'+(/^field/i.test(m.field) ? '' : 'Field: ')+esc(m.field)+'</span>':'')+'</div>'+
+  const cls = mode==='first' ? ' queuing first' : mode==='queue' ? ' queuing' : '';
+  return '<div class="card'+cls+'"><div class="row1"><span class="qbadge num">Q '+m.num+'</span>'+((!sc && m.field)?'<span class="field">'+esc(m.field)+'</span>':'')+'</div>'+
     bar('red', m.red, sc?m.rs:null, rw)+bar('blue', m.blue, sc?m.bs:null, bw)+'</div>';
 }
 function blankCard(){   /* empty card closing each table: no Q number, no teams */
@@ -955,7 +1021,7 @@ function blankCard(){   /* empty card closing each table: no Q number, no teams 
 }
 function matchGroups(div){
   const d = S[div].data;
-  let n = Math.max(1, Math.min(4, +(cfg[div] && cfg[div].fields) || 2));   /* number of fields */
+  let n = Math.max(1, Math.min(4, +(cfg[div] && cfg[div].fields) || (div==='hs' ? 3 : 2)));   /* number of fields */
   if (d && d.demo && d.fields) n = Math.max(1, Math.min(4, +d.fields));     /* the demo brings its own field count */
   if (!d) return {n:n, scored:[], onField:[], queuing:[]};
   const upcoming = d.matches.filter(m=>!m.scored);
@@ -1044,11 +1110,22 @@ function renderHeader(div){
   const lbl = isDouble() ? '<span class="div">'+div.toUpperCase()+'</span> ' : '';
   let txt;
   if (ph==='quals' || ph==='nosched') txt = 'Quals';
+  else if (ph==='lunch_rank' || ph==='lunch_queue') txt = 'Lunch Break';
   else if (ph==='bracket') txt = 'Finals';
   else if (ph==='setup') txt = 'Setup';
   else txt = d ? d.name : (cfg[div].sku || 'Not configured');      /* rankings only: event name */
   document.getElementById('b-'+div).innerHTML = lbl + esc(txt);
   renderStatus(div);
+}
+function resumeTime(d){ return d && d.lunchEnd ? new Date(d.lunchEnd*1000).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'}) : ''; }
+/* lunch break, last minutes: the matches that go on the fields next, shown as large NOW QUEUING cards */
+function renderLunchQ(div){
+  const d = S[div].data, box = document.getElementById('lq-'+div);
+  if (!d || d.phase !== 'lunch_queue'){ box.innerHTML = ''; return; }
+  const g = matchGroups(div), n = Math.max(1, g.onField.length);
+  box.innerHTML = '<div class="lq-head"><div class="lq-title">NOW QUEUING</div><div class="lq-sub">MATCHES RESUME '+esc(resumeTime(d))+'</div></div>'+
+    '<div class="lq-cards" style="'+(isDouble() ? 'grid-template-rows:repeat('+n+',minmax(0,1fr))' : 'grid-template-columns:repeat('+n+',minmax(0,1fr))')+'">'+
+    g.onField.map((m,i)=>matchCard(m, i===0 ? 'first' : 'queue')).join('')+'</div>';
 }
 function adminUrl(){ return 'http://'+ip+(location.port ? ':'+location.port : '')+'/admin'; }
 function renderMsg(div){
@@ -1065,17 +1142,18 @@ function applyView(){
   pn.style.gridTemplateColumns = isDouble() ? '1fr 1fr' : '1fr';
   pn.classList.toggle('single', !isDouble());
 }
-function renderDiv(d){ if (!visible(d)) return; applyPhase(d); renderHeader(d); renderMsg(d); renderMatches(d); renderBracket(d); renderRanks(d); }
+function renderDiv(d){ if (!visible(d)) return; applyPhase(d); renderHeader(d); renderMsg(d); renderLunchQ(d); renderMatches(d); renderBracket(d); renderRanks(d); }
 function renderAll(){ applyView(); ['hs','ms'].forEach(renderDiv); }
 
 /* ---------- phases: qualification view -> rankings only -> single-elimination bracket ---------- */
 function applyPhase(div){
   const d = S[div].data, p = document.getElementById('pane-'+div);
   const ph = d && d.phase ? d.phase : 'quals';
-  p.classList.toggle('ph-rankings', ph==='rankings');
+  p.classList.toggle('ph-rankings', ph==='rankings' || ph==='lunch_rank');
+  p.classList.toggle('ph-lunchq', ph==='lunch_queue');
   p.classList.toggle('ph-bracket', ph==='bracket');
   p.classList.toggle('ph-msg', ph==='setup' || ph==='nosched');
-  document.getElementById('rt-'+div).textContent = ph==='rankings' ? 'FINAL QUALIFICATION RANKINGS' : 'TEAM RANKINGS';
+  document.getElementById('rt-'+div).textContent = ph==='rankings' ? 'FINAL QUALIFICATION RANKINGS' : ph==='lunch_rank' ? 'LUNCH BREAK - MATCHES RESUME '+resumeTime(d) : 'TEAM RANKINGS';
 }
 
 /* 16-alliance single elimination: R16 #1-8 (slots 1-8) -> QF #1-4 (9-12) -> SF #1-2 (13-14) -> Final (15) */
@@ -1208,7 +1286,7 @@ ADMIN_HTML = r"""<!DOCTYPE html>
   body{background:#0a0e14;color:#eef3f9;font-family:"Barlow","Segoe UI","DejaVu Sans",Arial,sans-serif}
   .card{background:#111823;border:1px solid #26364a;border-radius:.75rem;padding:1.25rem}
   label{display:block;font-size:.85rem;color:#8da2ba;margin-bottom:.25rem}
-  input[type=text],input[type=number],textarea{width:100%;background:#0a0e14;border:1px solid #26364a;border-radius:.5rem;padding:.55rem .7rem;color:#eef3f9}
+  input[type=text],input[type=number],input[type=time],textarea{width:100%;background:#0a0e14;border:1px solid #26364a;border-radius:.5rem;padding:.55rem .7rem;color:#eef3f9}
   select{width:100%;background:#0a0e14;border:1px solid #26364a;border-radius:.5rem;padding:.55rem .7rem;color:#eef3f9}
   input:focus,textarea:focus,select:focus,button:focus-visible{outline:2px solid #ffc83d;outline-offset:1px}
   .btn{display:inline-flex;align-items:center;gap:.4rem;background:#1c2a3d;border:1px solid #2f4560;border-radius:.5rem;padding:.5rem .9rem;font-weight:600;cursor:pointer}
@@ -1250,6 +1328,12 @@ ADMIN_HTML = r"""<!DOCTYPE html>
       <label class="flex items-center gap-2" style="color:#eef3f9"><input type="checkbox" id="hs-demo"> Use demo data (no internet needed)</label>
       <div><label for="hs-div">Division (optional: id or name, blank = first division of the event)</label><input type="text" id="hs-div"></div>
       <div><label for="hs-fields">Number of fields (1-4): matches on the fields now / queuing</label><input type="number" id="hs-fields" min="1" max="4"></div>
+      <div class="grid grid-cols-3 gap-2">
+        <div><label for="hs-lunchq">Lunch break after Q # (blank = none)</label><input type="number" id="hs-lunchq" min="0" max="999"></div>
+        <div><label for="hs-lunchm">Break length (minutes)</label><input type="number" id="hs-lunchm" min="0" max="600"></div>
+        <div><label for="hs-lunchat">or play resumes at</label><input type="time" id="hs-lunchat"></div>
+      </div>
+      <p class="text-xs" style="color:#8da2ba">A resume time overrides the break length. At the break the screen shows only the rankings; 5 minutes before play resumes it shows the next matches as large NOW QUEUING cards; 30 seconds before, those matches move to ON FIELD NOW on the normal screen.</p>
       <div><label for="hs-phase">Display mode</label><select id="hs-phase"><option value="auto">Automatic (quals, then rankings, then bracket)</option><option value="quals">Always show qualification matches</option><option value="rankings">Always show rankings only</option><option value="bracket">Always show bracket</option></select></div>
       <div class="flex gap-2"><button class="btn" data-test="hs"><span data-i="activity"></span>Test HS connection</button></div>
     </div>
@@ -1260,6 +1344,12 @@ ADMIN_HTML = r"""<!DOCTYPE html>
       <label class="flex items-center gap-2" style="color:#eef3f9"><input type="checkbox" id="ms-demo"> Use demo data (no internet needed)</label>
       <div><label for="ms-div">Division (optional: id or name, blank = first division of the event)</label><input type="text" id="ms-div"></div>
       <div><label for="ms-fields">Number of fields (1-4): matches on the fields now / queuing</label><input type="number" id="ms-fields" min="1" max="4"></div>
+      <div class="grid grid-cols-3 gap-2">
+        <div><label for="ms-lunchq">Lunch break after Q # (blank = none)</label><input type="number" id="ms-lunchq" min="0" max="999"></div>
+        <div><label for="ms-lunchm">Break length (minutes)</label><input type="number" id="ms-lunchm" min="0" max="600"></div>
+        <div><label for="ms-lunchat">or play resumes at</label><input type="time" id="ms-lunchat"></div>
+      </div>
+      <p class="text-xs" style="color:#8da2ba">A resume time overrides the break length. At the break the screen shows only the rankings; 5 minutes before play resumes it shows the next matches as large NOW QUEUING cards; 30 seconds before, those matches move to ON FIELD NOW on the normal screen.</p>
       <div><label for="ms-phase">Display mode</label><select id="ms-phase"><option value="auto">Automatic (quals, then rankings, then bracket)</option><option value="quals">Always show qualification matches</option><option value="rankings">Always show rankings only</option><option value="bracket">Always show bracket</option></select></div>
       <div class="flex gap-2"><button class="btn" data-test="ms"><span data-i="activity"></span>Test MS connection</button></div>
     </div>
@@ -1319,8 +1409,8 @@ function toast(msg, ok){
   clearTimeout(toast.t); toast.t = setTimeout(()=>t.classList.add('hidden'), 4000);
 }
 function fill(){
-  $('hs-sku').value = cfg.hs.sku; $('hs-demo').checked = !!cfg.hs.demo; $('hs-div').value = cfg.hs.division || ''; $('hs-phase').value = cfg.hs.phase || 'auto'; $('hs-fields').value = cfg.hs.fields || 2;
-  $('ms-sku').value = cfg.ms.sku; $('ms-demo').checked = !!cfg.ms.demo; $('ms-div').value = cfg.ms.division || ''; $('ms-phase').value = cfg.ms.phase || 'auto'; $('ms-fields').value = cfg.ms.fields || 2;
+  $('hs-sku').value = cfg.hs.sku; $('hs-demo').checked = !!cfg.hs.demo; $('hs-div').value = cfg.hs.division || ''; $('hs-phase').value = cfg.hs.phase || 'auto'; $('hs-fields').value = cfg.hs.fields || 3; $('hs-lunchq').value = cfg.hs.lunchAfter || ''; $('hs-lunchm').value = cfg.hs.lunchMins || ''; $('hs-lunchat').value = cfg.hs.lunchResume || '';
+  $('ms-sku').value = cfg.ms.sku; $('ms-demo').checked = !!cfg.ms.demo; $('ms-div').value = cfg.ms.division || ''; $('ms-phase').value = cfg.ms.phase || 'auto'; $('ms-fields').value = cfg.ms.fields || 2; $('ms-lunchq').value = cfg.ms.lunchAfter || ''; $('ms-lunchm').value = cfg.ms.lunchMins || ''; $('ms-lunchat').value = cfg.ms.lunchResume || '';
   $('rankWait').value = cfg.rankWait == null ? 300 : cfg.rankWait;
   $('poll').value = cfg.poll; $('scroll').value = cfg.scroll;
   $('view').value = cfg.view === 'double' ? 'double' : 'single'; applyLock(); $('apiBase').value = cfg.apiBase || ''; $('token').value = '';
@@ -1328,15 +1418,15 @@ function fill(){
 }
 function read(){
   return {
-    hs:{sku:$('hs-sku').value.trim(), demo:$('hs-demo').checked, phase:$('hs-phase').value, division:$('hs-div').value.trim(), fields:+$('hs-fields').value||2},
-    ms:{sku:$('ms-sku').value.trim(), demo:$('ms-demo').checked, phase:$('ms-phase').value, division:$('ms-div').value.trim(), fields:+$('ms-fields').value||2},
+    hs:{sku:$('hs-sku').value.trim(), demo:$('hs-demo').checked, phase:$('hs-phase').value, division:$('hs-div').value.trim(), fields:+$('hs-fields').value||3, lunchAfter:+$('hs-lunchq').value||0, lunchMins:+$('hs-lunchm').value||0, lunchResume:$('hs-lunchat').value},
+    ms:{sku:$('ms-sku').value.trim(), demo:$('ms-demo').checked, phase:$('ms-phase').value, division:$('ms-div').value.trim(), fields:+$('ms-fields').value||2, lunchAfter:+$('ms-lunchq').value||0, lunchMins:+$('ms-lunchm').value||0, lunchResume:$('ms-lunchat').value},
     rankWait: $('rankWait').value === '' ? 300 : +$('rankWait').value,
     poll:+$('poll').value||15, scroll:+$('scroll').value||8, view:$('view').value, apiBase:$('apiBase').value.trim(), token:$('token').value.trim(), rev:cfg?cfg.rev:1
   };
 }
 async function load(){
   try { const r = await fetch('/api/config',{cache:'no-store'}); cfg = await r.json(); localStorage.setItem(LS_KEY, JSON.stringify(cfg)); }
-  catch(e){ try { cfg = JSON.parse(localStorage.getItem(LS_KEY)); } catch(_){} if(!cfg) cfg = {view:'single',hs:{sku:'',demo:false,fields:2},ms:{sku:'',demo:false,fields:2},poll:15,scroll:8,rev:1}; toast('Server unreachable: showing locally saved settings', false); }
+  catch(e){ try { cfg = JSON.parse(localStorage.getItem(LS_KEY)); } catch(_){} if(!cfg) cfg = {view:'single',hs:{sku:'',demo:false,fields:3},ms:{sku:'',demo:false,fields:2},poll:15,scroll:8,rev:1}; toast('Server unreachable: showing locally saved settings', false); }
   fill();
 }
 function applyLock(){
