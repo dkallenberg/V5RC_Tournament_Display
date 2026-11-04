@@ -14,7 +14,7 @@ Chromium kiosk launch (Pi desktop):
   chromium-browser --kiosk --noerrdialogs --disable-infobars \
       --autoplay-policy=no-user-gesture-required http://localhost:5000/
 """
-import argparse, base64, datetime, json, os, random, re, socket, threading, time
+import argparse, base64, datetime, hashlib, json, os, random, re, socket, threading, time
 import traceback
 import urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -706,6 +706,7 @@ def get_division(div, force=False):
             out["phase"] = "setup"                   # nothing configured yet
         elif out.get("online") and not out["matches"] and not out["elims"]:
             out["phase"] = "nosched"                 # event found, no schedule published yet
+    out["lunchAfter"] = DEMO_LUNCH_AFTER if entry["demo"] else int(entry.get("lunchAfter") or 0)
     out["rankWait"] = wait
     out["diag"] = diag
     CACHE[div] = {"t": now, "data": out}
@@ -755,7 +756,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ip": local_ip(), "port": self.server.server_address[1], "time": int(time.time())})
             elif path == "/api/command":
                 with CFG_LOCK:
-                    self._json({"seq": COMMAND["seq"], "cmd": COMMAND["cmd"], "rev": CONFIG["rev"]})
+                    self._json({"seq": COMMAND["seq"], "cmd": COMMAND["cmd"], "rev": CONFIG["rev"], "build": BUILD})
             elif path in ("/api/data/hs", "/api/data/ms"):
                 self._json(get_division(path[-2:]))
             elif path in ("/api/test/hs", "/api/test/ms"):
@@ -878,6 +879,7 @@ td.avg{color:var(--green)}
 /* the first NOW QUEUING card is steady but brighter than every other match card */
 .card.first{background:#46607f;border-color:#fff;box-shadow:0 0 1.2rem rgba(255,255,255,.6)}
 .card.first .field{color:#fff}
+.card.first .bt{color:#fff;text-shadow:0 0 .6rem rgba(255,255,255,.8)}   /* team numbers brighter than on any other card */
 .matches.dense{gap:.35rem}
 .matches.dense .card{padding:.15rem .6rem;gap:.1rem}
 .matches.dense .qbadge{font-size:1.05rem}
@@ -907,17 +909,21 @@ td.avg{color:var(--green)}
 #panes.single .ctitle{font-size:1.3rem}
 #panes.single .bh{font-size:1.15rem}
 #panes.single .sd{font-size:1.2rem;flex-basis:2rem}
-.lunchq{display:none;flex:1;min-height:0;flex-direction:column;gap:1rem;background:var(--gold);margin:.8rem;border-radius:.8rem;padding:1rem 1.3rem}
+.lunchq{display:none;flex:1;min-height:0;align-items:center;justify-content:center;padding:.8rem}
 .pane.ph-lunchq .pbody{display:none}
 .pane.ph-lunchq .lunchq{display:flex}
+.lq-panel{width:min(100%,66rem);max-height:100%;background:var(--gold);border-radius:1rem;padding:1rem 1.4rem;display:flex;flex-direction:column;gap:.9rem}
 .lq-head{display:flex;justify-content:space-between;align-items:baseline;gap:1rem;color:#1a1300}
-.lq-title{font-weight:800;font-size:3.6rem;letter-spacing:.04em}
-.lq-sub{font-weight:800;font-size:2.2rem}
-.lq-cards{flex:1;min-height:0;display:grid;gap:1.1rem}
-.lq-cards .card{padding:.8rem 1.2rem;gap:.7rem}
+.lq-title{font-weight:800;font-size:3.2rem;letter-spacing:.04em}
+.lq-sub{font-weight:800;font-size:2rem}
+.lq-cards{display:flex;flex-direction:column;gap:.9rem}
+.lq-cards .card{flex:none;padding:.6rem 1.2rem;gap:.5rem}
 .lq-cards .qbadge{font-size:3rem;padding:0 1rem}
 .lq-cards .row1{font-size:2.4rem}
-.lq-cards .card .bl{font-size:3.4rem;padding:.2rem 1rem}
+.lq-cards .card .bl{font-size:3.4rem;padding:.15rem 1rem}
+.lq-cards.n4 .qbadge{font-size:2.2rem}
+.lq-cards.n4 .row1{font-size:1.8rem}
+.lq-cards.n4 .card .bl{font-size:2.6rem}
 .msgbox{display:none;flex:1;min-height:0;flex-direction:column;align-items:center;justify-content:center;gap:1.4rem;text-align:center;padding:2rem}
 .pane.ph-msg .pbody{display:none}
 .pane.ph-msg .msgbox{display:flex}
@@ -982,7 +988,7 @@ function saveLocal(){ try { localStorage.setItem(LS_KEY, JSON.stringify(cfg)); }
 
 const esc = s => String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const S = { hs:{data:null, fails:0, timer:null}, ms:{data:null, fails:0, timer:null} };
-let page = 0, countdown = cfg.scroll, lastSeq = null, ip = location.hostname;
+let page = 0, countdown = cfg.scroll, lastSeq = null, build = null, ip = location.hostname;
 
 /* ---------- pane skeleton ---------- */
 function buildPane(div){
@@ -1024,7 +1030,10 @@ function matchGroups(div){
   let n = Math.max(1, Math.min(4, +(cfg[div] && cfg[div].fields) || (div==='hs' ? 3 : 2)));   /* number of fields */
   if (d && d.demo && d.fields) n = Math.max(1, Math.min(4, +d.fields));     /* the demo brings its own field count */
   if (!d) return {n:n, scored:[], onField:[], queuing:[]};
-  const upcoming = d.matches.filter(m=>!m.scored);
+  let upcoming = d.matches.filter(m=>!m.scored);
+  /* before the lunch break, matches that come after lunch are not shown on the normal screen */
+  const la = +d.lunchAfter || 0;
+  if (la > 0 && !d.matches.some(m=>m.num===la && m.scored)) upcoming = upcoming.filter(m=>m.num<=la);
   return {n:n, scored:d.matches.filter(m=>m.scored).slice(-2).reverse(), onField:upcoming.slice(0,n), queuing:upcoming.slice(n,2*n)};
 }
 
@@ -1122,10 +1131,9 @@ function resumeTime(d){ return d && d.lunchEnd ? new Date(d.lunchEnd*1000).toLoc
 function renderLunchQ(div){
   const d = S[div].data, box = document.getElementById('lq-'+div);
   if (!d || d.phase !== 'lunch_queue'){ box.innerHTML = ''; return; }
-  const g = matchGroups(div), n = Math.max(1, g.onField.length);
-  box.innerHTML = '<div class="lq-head"><div class="lq-title">NOW QUEUING</div><div class="lq-sub">MATCHES RESUME '+esc(resumeTime(d))+'</div></div>'+
-    '<div class="lq-cards" style="'+(isDouble() ? 'grid-template-rows:repeat('+n+',minmax(0,1fr))' : 'grid-template-columns:repeat('+n+',minmax(0,1fr))')+'">'+
-    g.onField.map((m,i)=>matchCard(m, i===0 ? 'first' : 'queue')).join('')+'</div>';
+  const g = matchGroups(div);
+  box.innerHTML = '<div class="lq-panel"><div class="lq-head"><div class="lq-title">NOW QUEUING</div><div class="lq-sub">MATCHES RESUME '+esc(resumeTime(d))+'</div></div>'+
+    '<div class="lq-cards'+(g.n>=4 ? ' n4' : '')+'">'+g.onField.map((m,i)=>matchCard(m, i===0 ? 'first' : 'queue')).join('')+'</div></div>';
 }
 function adminUrl(){ return 'http://'+ip+(location.port ? ':'+location.port : '')+'/admin'; }
 function renderMsg(div){
@@ -1228,6 +1236,8 @@ function pollAll(){ poll('hs'); poll('ms'); }
 async function syncControl(){
   try {
     const c = await fetchJson('/api/command', 4000);
+    if (build === null) build = c.build;
+    else if (c.build && c.build !== build){ location.reload(); return; }     /* server restarted with new code */
     if (lastSeq === null){ lastSeq = c.seq; }
     else if (c.seq !== lastSeq){
       lastSeq = c.seq;
@@ -1485,6 +1495,9 @@ load();
 </body>
 </html>
 """
+
+
+BUILD = hashlib.md5((KIOSK_HTML + ADMIN_HTML).encode("utf-8")).hexdigest()[:10]   # changes whenever the page code changes
 
 
 def main():
