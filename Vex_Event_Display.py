@@ -542,7 +542,7 @@ DEMO_CYCLE = DEMO_QUAL_END + 15 + 5 + 3 * 15 + 15
 def demo_data(div, now):
     """Demo event whose state depends on how long demo mode has been running (see timeline above)."""
     rnd = random.Random(7 if div == "hs" else 11)
-    n_teams = 32
+    n_teams = 50 if div == "hs" else 32
     teams = ["%d%s" % (1000 + i * 41 + (0 if div == "hs" else 9000), "ABCDEFG"[i % 7]) for i in range(n_teams)]
     fields = ["RED 1", "BLUE 1", "RED 2", "BLUE 2"]
     matches = []
@@ -791,12 +791,12 @@ body{height:100%;background:var(--bg);color:var(--text);font-family:"Barlow Cond
 .sec{display:flex;flex-direction:column;gap:.45rem;min-height:0}
 .sec.last{flex:0 0 auto}
 .sec.next{flex:1}
-.card{background:var(--bg);border:.12rem solid var(--line);border-radius:.6rem;padding:.4rem .7rem;display:flex;flex-direction:column;justify-content:center;gap:.25rem;min-height:0}
+.card{background:var(--bg);border:.12rem solid var(--line);border-radius:.6rem;padding:.3rem .7rem;display:flex;flex-direction:column;justify-content:center;gap:.2rem;min-height:0}
 .sec.next .card{flex:1}
 .card.upnext{border-color:var(--gold);box-shadow:inset 0 0 0 .1rem var(--gold)}
-.row1{display:flex;align-items:center;gap:.6rem;font-size:1.35rem;font-weight:700}
-.qbadge{background:var(--text);color:var(--bg);border-radius:.4rem;padding:0 .6rem;font-weight:800;font-size:1.5rem}
-.field{color:var(--dim)}
+.row1{display:flex;align-items:center;gap:.6rem;font-size:1.25rem;font-weight:700}
+.qbadge{background:var(--text);color:var(--bg);border-radius:.4rem;padding:0 .6rem;font-weight:800;font-size:1.3rem}
+.field{color:var(--dim);margin-left:auto}
 .nextflag{margin-left:auto;background:var(--gold);color:#1a1300;font-weight:800;border-radius:.4rem;padding:0 .6rem;font-size:1.3rem}
 .win{margin-left:auto;font-weight:800;border-radius:.4rem;padding:0 .6rem;font-size:1.3rem}
 .win.red{background:var(--red);color:#fff}.win.blue{background:var(--blue);color:#021428}.win.tie{background:var(--dim);color:#0a0e14}
@@ -817,7 +817,9 @@ td{font-size:1.75rem;font-weight:700;text-align:right;padding:0 .4rem;height:cal
 th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}
 td:nth-child(2){font-weight:800}
 td.rk{color:var(--gold);font-weight:800}
-tr.top3 td:nth-child(2){color:var(--gold)}
+td:nth-child(2){color:#fff}
+tr.qteam td{background:rgba(255,200,61,.14)}
+tr.qteam td:nth-child(2){background:var(--gold);color:#1a1300;border-radius:.35rem}   /* teams headed to the queuing tables */
 td.avg{color:var(--green)}
 .sec.last{margin-bottom:.2rem}
 .queue-title{color:var(--gold)}
@@ -831,16 +833,12 @@ td.avg{color:var(--green)}
 @media (prefers-reduced-motion:reduce){.card.police{animation:none}}
 .matches.dense{gap:.35rem}
 .matches.dense .card{padding:.15rem .6rem;gap:.1rem}
-.matches.dense .qbadge{font-size:1.15rem}
-.matches.dense .row1{font-size:1.1rem}
-.matches.dense .alli{font-size:1.4rem}
-.matches.dense .alli .score{font-size:1.8rem}
-/* single (full screen): rankings use the left 3/4 as several columns, matches keep the right 1/4 */
-#panes.single .pane:not(.ph-bracket):not(.ph-rankings) .pbody{grid-template-columns:75% 25%}
-#panes.single .pane{--rowh:3.5}
-#panes.single td{font-size:1.4rem;padding:0 .25rem}
-#panes.single th{font-size:1.05rem;padding:.3rem .25rem}
-.rcols{display:grid;gap:1.4rem;height:100%}
+.matches.dense .qbadge{font-size:1.05rem}
+.matches.dense .row1{font-size:1rem}
+.matches.dense .card .bl{font-size:1.1rem}
+.card .bl{font-size:1.35rem;line-height:1.15;padding:.05rem .6rem}
+.card .bl.win{margin:0 -.7rem;padding:.05rem 1.3rem}   /* winner's block runs the full width of the card */
+.card.blank .bl{opacity:.3}
 .bl.red.win{background:#ff2d45;color:#fff;box-shadow:0 0 .7rem rgba(255,45,69,.75)}
 .bl.blue.win{background:#2f7bff;color:#fff;box-shadow:0 0 .7rem rgba(47,123,255,.75)}
 .bl.win .sd{color:#fff}
@@ -882,7 +880,8 @@ td.avg{color:var(--green)}
 .bl .bt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .bl .bt.ph{font-weight:600;font-style:italic;opacity:.5}
 .bl.win .bs{color:#fff}
-.bl.win{margin:0 -.35rem;padding:0 .65rem}   /* winner's block runs the full width of the card */
+.bm .bl.win{margin:0 -.35rem;padding:0 .65rem}   /* winner's block runs the full width of the card */
+.bl .bt{display:flex;gap:.9rem}                   /* team numbers a bit further apart */
 .bcell.fin .bm{flex:0 1 auto;max-height:none;padding:.35rem .45rem}
 #foot{flex:0 0 auto;display:none;justify-content:space-between;align-items:center;gap:1.5rem;padding:.55rem 1.4rem;background:#070a0f;border-top:.14rem solid var(--line);font-size:1.3rem;font-weight:700;color:var(--dim);white-space:nowrap}
 #foot b{color:var(--text)}
@@ -945,17 +944,25 @@ function buildPane(div){
 /* ---------- renderers ---------- */
 function teamsHtml(a, cls){ return a.map(t=>'<span'+(cls?' class="'+cls+'"':'')+'>'+esc(t)+'</span>').join(''); }
 
-function lastCard(m){
-  const rw = m.rs>m.bs, bw = m.bs>m.rs;
-  const win = rw ? '<span class="win red">RED WINS</span>' : bw ? '<span class="win blue">BLUE WINS</span>' : '<span class="win tie">TIE</span>';
-  return '<div class="card"><div class="row1"><span class="qbadge num">Q '+m.num+'</span>'+(m.field?'<span class="field">Field: '+esc(m.field)+'</span>':'')+win+'</div>'+
-    '<div class="row2"><div class="alli red'+(bw?' lose':'')+'"><span class="teams">'+teamsHtml(m.red)+'</span><span class="score num">'+m.rs+'</span></div>'+
-    '<div class="alli blue'+(rw?' lose':'')+'"><span class="teams">'+teamsHtml(m.blue)+'</span><span class="score num">'+m.bs+'</span></div></div></div>';
+/* Qualification match card, laid out like the elimination cards: Q badge (white) with the field name on the right,
+   then a red bar and a blue bar. The field name is dropped once the match is scored; the winner's bar lights up. */
+function bar(cls, teams, score, win){
+  return '<div class="bl '+cls+(win?' win':'')+'"><span class="bt">'+teamsHtml(teams)+'</span><span class="bs num">'+(score==null?'':score)+'</span></div>';
 }
-function nextCard(m, mode){   /* mode: 'field' | 'queue' | 'first' (first queuing card flashes) */
+function matchCard(m, mode){   /* mode: 'scored' | 'field' | 'queue' | 'first' (first queuing card flashes like police lights) */
+  const sc = !!m.scored, rw = sc && m.rs>m.bs, bw = sc && m.bs>m.rs;
   const cls = mode==='first' ? ' queuing police' : mode==='queue' ? ' queuing' : '';
-  return '<div class="card'+cls+'"><div class="row1"><span class="qbadge num">Q '+m.num+'</span>'+(m.field?'<span class="field">Field: '+esc(m.field)+'</span>':'')+'</div>'+
-    '<div class="row2"><div class="alli red"><span class="teams">'+teamsHtml(m.red)+'</span></div><div class="alli blue"><span class="teams">'+teamsHtml(m.blue)+'</span></div></div></div>';
+  return '<div class="card'+cls+'"><div class="row1"><span class="qbadge num">Q '+m.num+'</span>'+((!sc && m.field)?'<span class="field">Field: '+esc(m.field)+'</span>':'')+'</div>'+
+    bar('red', m.red, sc?m.rs:null, rw)+bar('blue', m.blue, sc?m.bs:null, bw)+'</div>';
+}
+function blankCard(){   /* empty card closing each table: no Q number, no teams */
+  return '<div class="card blank"><div class="row1"><span class="qbadge" style="visibility:hidden">Q</span></div><div class="bl red"><span class="bt">&nbsp;</span></div><div class="bl blue"><span class="bt">&nbsp;</span></div></div>';
+}
+function matchGroups(div){
+  const d = S[div].data, n = Math.max(1, Math.min(4, +(cfg[div] && cfg[div].fields) || 2));   /* number of fields */
+  if (!d) return {n:n, scored:[], onField:[], queuing:[]};
+  const upcoming = d.matches.filter(m=>!m.scored);
+  return {n:n, scored:d.matches.filter(m=>m.scored).slice(-2).reverse(), onField:upcoming.slice(0,n), queuing:upcoming.slice(n,2*n)};
 }
 
 function pageSize(div){
@@ -980,14 +987,11 @@ function renderMatches(div){
   const d = S[div].data;
   const last = document.getElementById('last-'+div), nxt = document.getElementById('next-'+div), que = document.getElementById('queue-'+div);
   if (!d){ last.innerHTML = '<div class="empty">Waiting for data…</div>'; nxt.innerHTML=''; que.innerHTML=''; return; }
-  const n = Math.max(1, Math.min(4, +(cfg[div] && cfg[div].fields) || 2));   /* number of fields */
-  last.closest('.matches').classList.toggle('dense', n >= 3);
-  const scored = d.matches.filter(m=>m.scored).slice(-2).reverse();
-  const upcoming = d.matches.filter(m=>!m.scored);
-  const onField = upcoming.slice(0, n), queuing = upcoming.slice(n, 2*n);
-  last.innerHTML = scored.length ? scored.map(lastCard).join('') : '<div class="empty">No matches scored yet</div>';
-  nxt.innerHTML = onField.length ? onField.map(m=>nextCard(m,'field')).join('') : '<div class="empty">No matches on the fields</div>';
-  que.innerHTML = queuing.length ? queuing.map((m,i)=>nextCard(m, i===0 ? 'first' : 'queue')).join('') : '<div class="empty">No matches queuing</div>';
+  const g = matchGroups(div);
+  last.closest('.matches').classList.toggle('dense', g.n >= 3);
+  last.innerHTML = g.scored.length ? g.scored.map(m=>matchCard(m,'scored')).join('') : '<div class="empty">No matches scored yet</div>';
+  nxt.innerHTML = g.onField.map(m=>matchCard(m,'field')).join('') + blankCard();
+  que.innerHTML = g.queuing.map((m,i)=>matchCard(m, i===0 ? 'first' : 'queue')).join('') + blankCard();
 }
 
 /* number of ranking columns: 1 in double mode; in single (full screen) 3 beside the matches, 4 when rankings-only */
@@ -999,12 +1003,13 @@ function renderRanks(div){
   if (!visible(div)) return;
   const d = S[div].data, wrap = document.getElementById('rw-'+div), pi = document.getElementById('pi-'+div);
   if (!d || !d.rankings.length){ wrap.innerHTML='<div class="empty">'+(d? 'No rankings published yet':'Waiting for data…')+'</div>'; pi.textContent=''; return; }
+  const qt = new Set(); matchGroups(div).queuing.forEach(m=>m.red.concat(m.blue).forEach(t=>qt.add(t)));   /* teams at the queuing tables */
   const K = rankCols(div), size = pageSize(div), per = size*K;
   const pages = Math.max(1, Math.ceil(d.rankings.length/per)), p = page % pages;
   const rows = d.rankings.slice(p*per, p*per+per);
   pi.textContent = 'PAGE '+(p+1)+' / '+pages;
   const table = rs => '<table><thead><tr><th>#</th><th>TEAM</th><th>W-L-T</th><th>WP</th><th>AP</th><th>SP</th><th>AVG</th></tr></thead><tbody>'+
-    rs.map(r=>'<tr class="'+(r.rank<=3?'top3':'')+' num"><td class="rk">'+r.rank+'</td><td>'+esc(r.team)+'</td><td>'+r.w+'-'+r.l+'-'+r.t+'</td><td>'+r.wp+'</td><td>'+r.ap+'</td><td>'+r.sp+'</td><td class="avg">'+(+r.avg).toFixed(1)+'</td></tr>').join('')+
+    rs.map(r=>'<tr class="'+(qt.has(r.team)?'qteam ':'')+'num"><td class="rk">'+r.rank+'</td><td>'+esc(r.team)+'</td><td>'+r.w+'-'+r.l+'-'+r.t+'</td><td>'+r.wp+'</td><td>'+r.ap+'</td><td>'+r.sp+'</td><td class="avg">'+(+r.avg).toFixed(1)+'</td></tr>').join('')+
     '</tbody></table>';
   let h = '<div class="rcols" style="grid-template-columns:repeat('+K+',minmax(0,1fr))">';
   for (let k=0; k<K; k++){ const part = rows.slice(k*size, (k+1)*size); h += '<div>'+(part.length ? table(part) : '')+'</div>'; }
@@ -1091,7 +1096,7 @@ function renderBracket(div){
     const m = by[slot]; if (!m || !m.scored || m.rs===m.bs) return null;
     return side(slot, m.rs>m.bs ? 0 : 1);
   }
-  const line = (cls,x,score,win,lose) => '<div class="bl '+cls+(win?' win':'')+(lose?' lose':'')+'"><span class="sd num">'+(x.seed==null?'':x.seed)+'</span><span class="bt'+(x.teams?'':' ph')+'">'+esc(x.teams?x.teams.join(' '):x.ph)+'</span><span class="bs num">'+(score==null?'':score)+'</span></div>';
+  const line = (cls,x,score,win,lose) => '<div class="bl '+cls+(win?' win':'')+(lose?' lose':'')+'"><span class="sd num">'+(x.seed==null?'':x.seed)+'</span><span class="bt'+(x.teams?'':' ph')+'">'+(x.teams ? x.teams.map(t=>'<span>'+esc(t)+'</span>').join('') : esc(x.ph))+'</span><span class="bs num">'+(score==null?'':score)+'</span></div>';
   function card(slot){
     const m = by[slot], a = side(slot,0), b = side(slot,1);
     const sc = !!(m&&m.scored), rw = sc&&m.rs>m.bs, bw = sc&&m.bs>m.rs;
