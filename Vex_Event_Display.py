@@ -880,6 +880,8 @@ td.avg{color:var(--green)}
 .card.first{background:#46607f;border-color:#fff;box-shadow:0 0 1.2rem rgba(255,255,255,.6)}
 .card.first .field{color:#fff}
 .card.first .bt{color:#fff;text-shadow:0 0 .6rem rgba(255,255,255,.8)}   /* team numbers brighter than on any other card */
+.card.first .bl.red{background:#ff2d45;color:#fff}      /* bright alliance bars on the top NOW QUEUING card */
+.card.first .bl.blue{background:#2f7bff;color:#fff}
 .matches.dense{gap:.35rem}
 .matches.dense .card{padding:.15rem .6rem;gap:.1rem}
 .matches.dense .qbadge{font-size:1.05rem}
@@ -917,13 +919,15 @@ td.avg{color:var(--green)}
 .lq-title{font-weight:800;font-size:3.2rem;letter-spacing:.04em}
 .lq-sub{font-weight:800;font-size:2rem}
 .lq-cards{display:flex;flex-direction:column;gap:.9rem}
-.lq-cards .card{flex:none;padding:.6rem 1.2rem;gap:.5rem}
-.lq-cards .qbadge{font-size:3rem;padding:0 1rem}
-.lq-cards .row1{font-size:2.4rem}
-.lq-cards .card .bl{font-size:3.4rem;padding:.15rem 1rem}
-.lq-cards.n4 .qbadge{font-size:2.2rem}
-.lq-cards.n4 .row1{font-size:1.8rem}
-.lq-cards.n4 .card .bl{font-size:2.6rem}
+.lq-cards .card{flex:none;padding:.3rem 1.2rem;gap:.3rem}
+.lq-cards .qbadge{font-size:2.2rem;padding:0 1rem;line-height:1.2}
+.lq-cards .row1{font-size:2rem}
+/* team numbers: 6.8rem = 2x the previous 3.4rem; the score column is dropped because these matches are unplayed */
+.lq-cards .card .bl{font-size:6.8rem;line-height:1;padding:0 1rem;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+.lq-cards .card .bl .bs{display:none}
+.lq-cards.n4 .qbadge{font-size:1.8rem}
+.lq-cards.n4 .row1{font-size:1.6rem}
+.lq-cards.n4 .card .bl{font-size:5.2rem}   /* 4 fields: as large as still fits the screen */
 .msgbox{display:none;flex:1;min-height:0;flex-direction:column;align-items:center;justify-content:center;gap:1.4rem;text-align:center;padding:2rem}
 .pane.ph-msg .pbody{display:none}
 .pane.ph-msg .msgbox{display:flex}
