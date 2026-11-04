@@ -707,6 +707,7 @@ def get_division(div, force=False):
         elif out.get("online") and not out["matches"] and not out["elims"]:
             out["phase"] = "nosched"                 # event found, no schedule published yet
     out["lunchAfter"] = DEMO_LUNCH_AFTER if entry["demo"] else int(entry.get("lunchAfter") or 0)
+    out["serverTime"] = now
     out["rankWait"] = wait
     out["diag"] = diag
     CACHE[div] = {"t": now, "data": out}
@@ -876,12 +877,6 @@ td.avg{color:var(--green)}
 .queue-sec{background:var(--gold);border-radius:.7rem;padding:.35rem .5rem}
 .queue-title{color:#1a1300}
 .card.queuing{border-color:#1a1300}
-/* the first NOW QUEUING card is steady but brighter than every other match card */
-.card.first{background:#46607f;border-color:#fff;box-shadow:0 0 1.2rem rgba(255,255,255,.6)}
-.card.first .field{color:#fff}
-.card.first .bt{color:#fff;text-shadow:0 0 .6rem rgba(255,255,255,.8)}   /* team numbers brighter than on any other card */
-.card.first .bl.red{background:#ff2d45;color:#fff}      /* bright alliance bars on the top NOW QUEUING card */
-.card.first .bl.blue{background:#2f7bff;color:#fff}
 .matches.dense{gap:.35rem}
 .matches.dense .card{padding:.15rem .6rem;gap:.1rem}
 .matches.dense .qbadge{font-size:1.05rem}
@@ -911,10 +906,13 @@ td.avg{color:var(--green)}
 #panes.single .ctitle{font-size:1.3rem}
 #panes.single .bh{font-size:1.15rem}
 #panes.single .sd{font-size:1.2rem;flex-basis:2rem}
-.lunchq{display:none;flex:1;min-height:0;align-items:center;justify-content:center;padding:.8rem}
+.lunchq{display:none;flex:1;min-height:0;flex-direction:column;align-items:center;justify-content:space-between;padding:.8rem}
 .pane.ph-lunchq .pbody{display:none}
 .pane.ph-lunchq .lunchq{display:flex}
-.lq-panel{width:min(100%,66rem);max-height:100%;background:var(--gold);border-radius:1rem;padding:1rem 1.4rem;display:flex;flex-direction:column;gap:.9rem}
+.lq-count{text-align:center;line-height:1}
+.lq-lbl{font-weight:800;font-size:1.8rem;letter-spacing:.1em;color:var(--gold);margin-bottom:.5rem}
+.lq-time{font-weight:800;font-size:6.5rem;color:#fff}
+.lq-panel{width:min(100%,66rem);background:var(--gold);border-radius:1rem;padding:1rem 1.4rem;display:flex;flex-direction:column;gap:.9rem}
 .lq-head{display:flex;justify-content:space-between;align-items:baseline;gap:1rem;color:#1a1300}
 .lq-title{font-weight:800;font-size:3.2rem;letter-spacing:.04em}
 .lq-sub{font-weight:800;font-size:2rem}
@@ -922,12 +920,12 @@ td.avg{color:var(--green)}
 .lq-cards .card{flex:none;padding:.3rem 1.2rem;gap:.3rem}
 .lq-cards .qbadge{font-size:2.2rem;padding:0 1rem;line-height:1.2}
 .lq-cards .row1{font-size:2rem}
-/* team numbers: 6.8rem = 2x the previous 3.4rem; the score column is dropped because these matches are unplayed */
-.lq-cards .card .bl{font-size:6.8rem;line-height:1;padding:0 1rem;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+/* the #panes prefix is needed: "#panes.single .bl" would otherwise win and keep the numbers small */
+#panes .lq-cards .card .bl{font-size:5.4rem;line-height:1;padding:0 1rem;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
 .lq-cards .card .bl .bs{display:none}
 .lq-cards.n4 .qbadge{font-size:1.8rem}
 .lq-cards.n4 .row1{font-size:1.6rem}
-.lq-cards.n4 .card .bl{font-size:5.2rem}   /* 4 fields: as large as still fits the screen */
+#panes .lq-cards.n4 .card .bl{font-size:3.8rem}   /* 4 fields: as large as still fits */
 .msgbox{display:none;flex:1;min-height:0;flex-direction:column;align-items:center;justify-content:center;gap:1.4rem;text-align:center;padding:2rem}
 .pane.ph-msg .pbody{display:none}
 .pane.ph-msg .msgbox{display:flex}
@@ -1020,9 +1018,9 @@ function teamsHtml(a, cls){ return a.map(t=>'<span'+(cls?' class="'+cls+'"':'')+
 function bar(cls, teams, score, win){
   return '<div class="bl '+cls+(win?' win':'')+'"><span class="bt">'+teamsHtml(teams)+'</span><span class="bs num">'+(score==null?'':score)+'</span></div>';
 }
-function matchCard(m, mode){   /* mode: 'scored' | 'field' | 'queue' | 'first' (first queuing card is shown brighter) */
+function matchCard(m, mode){   /* mode: 'scored' | 'field' | 'queue' */
   const sc = !!m.scored, rw = sc && m.rs>m.bs, bw = sc && m.bs>m.rs;
-  const cls = mode==='first' ? ' queuing first' : mode==='queue' ? ' queuing' : '';
+  const cls = mode==='queue' ? ' queuing' : '';
   return '<div class="card'+cls+'"><div class="row1"><span class="qbadge num">Q '+m.num+'</span>'+((!sc && m.field)?'<span class="field">'+esc(m.field)+'</span>':'')+'</div>'+
     bar('red', m.red, sc?m.rs:null, rw)+bar('blue', m.blue, sc?m.bs:null, bw)+'</div>';
 }
@@ -1069,7 +1067,7 @@ function renderMatches(div){
   /* one slot per field in each table; a slot with no match left stays an empty card (no Q number, no teams) */
   const fill = (arr, mk) => arr.map(mk).join('') + new Array(Math.max(0, g.n - arr.length)).fill(blankCard()).join('');
   nxt.innerHTML = fill(g.onField, m=>matchCard(m,'field'));
-  que.innerHTML = fill(g.queuing, (m,i)=>matchCard(m, i===0 ? 'first' : 'queue'));
+  que.innerHTML = fill(g.queuing, m=>matchCard(m,'queue'));
 }
 
 /* number of ranking columns: 1 in double mode; in single (full screen) 3 beside the matches, 4 when rankings-only */
@@ -1132,12 +1130,24 @@ function renderHeader(div){
 }
 function resumeTime(d){ return d && d.lunchEnd ? new Date(d.lunchEnd*1000).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'}) : ''; }
 /* lunch break, last minutes: the matches that go on the fields next, shown as large NOW QUEUING cards */
+function fmtCount(sec){
+  sec = Math.max(0, Math.floor(sec));
+  const h = Math.floor(sec/3600), m = Math.floor(sec%3600/60), x = sec%60, p = n => String(n).padStart(2,'0');
+  return (h ? h+':' : '') + p(m) + ':' + p(x);
+}
+function updateCountdown(div){        /* time left until play resumes, on the large-card lunch screen */
+  const el = document.getElementById('cd-'+div), d = S[div].data;
+  if (!el || !d || !d.lunchEnd) return;
+  el.textContent = fmtCount(d.lunchEnd - (Date.now() + (S[div].off||0))/1000);
+}
 function renderLunchQ(div){
   const d = S[div].data, box = document.getElementById('lq-'+div);
   if (!d || d.phase !== 'lunch_queue'){ box.innerHTML = ''; return; }
   const g = matchGroups(div);
-  box.innerHTML = '<div class="lq-panel"><div class="lq-head"><div class="lq-title">NOW QUEUING</div><div class="lq-sub">MATCHES RESUME '+esc(resumeTime(d))+'</div></div>'+
-    '<div class="lq-cards'+(g.n>=4 ? ' n4' : '')+'">'+g.onField.map((m,i)=>matchCard(m, i===0 ? 'first' : 'queue')).join('')+'</div></div>';
+  box.innerHTML = '<div class="lq-count"><div class="lq-lbl">MATCHES RESUME IN</div><div class="lq-time num" id="cd-'+div+'"></div></div>'+
+    '<div class="lq-panel"><div class="lq-head"><div class="lq-title">NOW QUEUING</div><div class="lq-sub">MATCHES RESUME '+esc(resumeTime(d))+'</div></div>'+
+    '<div class="lq-cards'+(g.n>=4 ? ' n4' : '')+'">'+g.onField.map(m=>matchCard(m,'queue')).join('')+'</div></div>';
+  updateCountdown(div);
 }
 function adminUrl(){ return 'http://'+ip+(location.port ? ':'+location.port : '')+'/admin'; }
 function renderMsg(div){
@@ -1229,6 +1239,7 @@ async function poll(div){
   try {
     const d = await fetchJson('/api/data/'+div, 12000);
     s.data = d; s.fails = d.online ? 0 : Math.min(s.fails+1, 2);
+    s.off = d.serverTime ? d.serverTime*1000 - Date.now() : 0;      /* server clock minus this browser's clock */
   } catch(e){ s.fails++; }
   renderDiv(div);
   const delay = s.fails ? Math.min(cfg.poll*1000*Math.pow(2, s.fails-1), 60000) : ((s.data && s.data.demo) ? 2000 : cfg.poll*1000);
@@ -1265,6 +1276,7 @@ async function clearEverything(){
 /* ---------- 1s tick: page cycling ---------- */
 setInterval(function(){
   countdown--;
+  ['hs','ms'].forEach(updateCountdown);
   if (countdown <= 0){ page++; countdown = cfg.scroll; ['hs','ms'].forEach(d => isDouble() ? renderRanks(d) : advanceRanks(d)); }
 }, 1000);
 window.addEventListener('resize', ()=>['hs','ms'].forEach(renderRanks));
