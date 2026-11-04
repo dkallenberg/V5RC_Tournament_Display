@@ -990,8 +990,10 @@ function renderMatches(div){
   const g = matchGroups(div);
   last.closest('.matches').classList.toggle('dense', g.n >= 3);
   last.innerHTML = g.scored.length ? g.scored.map(m=>matchCard(m,'scored')).join('') : '<div class="empty">No matches scored yet</div>';
-  nxt.innerHTML = g.onField.map(m=>matchCard(m,'field')).join('') + blankCard();
-  que.innerHTML = g.queuing.map((m,i)=>matchCard(m, i===0 ? 'first' : 'queue')).join('') + blankCard();
+  /* one slot per field in each table; a slot with no match left stays an empty card (no Q number, no teams) */
+  const fill = (arr, mk) => arr.map(mk).join('') + new Array(Math.max(0, g.n - arr.length)).fill(blankCard()).join('');
+  nxt.innerHTML = fill(g.onField, m=>matchCard(m,'field'));
+  que.innerHTML = fill(g.queuing, (m,i)=>matchCard(m, i===0 ? 'first' : 'queue'));
 }
 
 /* number of ranking columns: 1 in double mode; in single (full screen) 3 beside the matches, 4 when rankings-only */
