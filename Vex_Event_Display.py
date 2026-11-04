@@ -540,11 +540,11 @@ def demo_data(div, now):
     rnd = random.Random(7 if div == "hs" else 11)
     n_teams = 50 if div == "hs" else 32
     teams = ["%d%s" % (1000 + i * 41 + (0 if div == "hs" else 9000), "ABCDEFG"[i % 7]) for i in range(n_teams)]
-    fields = ["RED 1", "BLUE 1", "RED 2", "BLUE 2"]
+    fields = ["Field 1", "Field 2", "Field 3"] if div == "hs" else ["RED 1", "BLUE 1", "RED 2", "BLUE 2"]
     matches = []
     for n in range(1, 61):
         four = rnd.sample(teams, 4)
-        matches.append({"num": n, "inst": 1, "field": fields[(n - 1) % 4], "red": four[:2], "blue": four[2:],
+        matches.append({"num": n, "inst": 1, "field": fields[(n - 1) % len(fields)], "red": four[:2], "blue": four[2:],
                         "_rs": rnd.randint(18, 96), "_bs": rnd.randint(18, 96)})
     clock = (now - DEMO_START.get(div, SERVER_START)) % DEMO_CYCLE
     done = 60 if clock >= DEMO_QUAL_END else min(60, 2 + int(clock // 3))
@@ -579,7 +579,7 @@ def demo_data(div, now):
         elims = sim_bracket(alliances, 0 if since < 0 else min(15, int(since // 3) + 1), random.Random(5))
     name = "Demo %s Championship" % ("High School" if div == "hs" else "Middle School")
     return {"name": name, "sku": "DEMO", "matches": matches, "rankings": rankings,
-            "elims": elims, "alliances": alliances}
+            "elims": elims, "alliances": alliances, "fields": 3 if div == "hs" else None}   # HS demo runs 3 fields
 
 
 # --------------------------------------------------------------------------
@@ -831,6 +831,11 @@ td.avg{color:var(--green)}
 .matches.dense .card .bl{font-size:1.1rem}
 .card .bl{font-size:1.35rem;line-height:1.15;padding:.05rem .6rem}
 .card .bl.win{margin:0 -.7rem;padding:.05rem 1.3rem}   /* winner's block runs the full width of the card */
+/* alliance line: a fixed score column (room for 199), the rest split in two halves with one team centred in each */
+.card .bl{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) 3ch;column-gap:.4rem;align-items:center}
+.card .bl .bt{display:contents}
+.card .bl .bt>span{text-align:center;min-width:0;overflow:hidden;white-space:nowrap}
+.card .bl .bs{text-align:right}
 .card.blank .bl{opacity:.3}
 /* single (full screen): rankings use the left 3/4 as several columns, matches keep the right 1/4 */
 #panes.single .pane:not(.ph-bracket):not(.ph-rankings) .pbody{grid-template-columns:minmax(0,3fr) minmax(0,1fr)}
@@ -838,6 +843,9 @@ td.avg{color:var(--green)}
 #panes.single td{font-size:1.4rem;padding:0 .25rem}
 #panes.single th{font-size:1.05rem;padding:.3rem .25rem}
 .rcols{display:grid;gap:1.4rem;height:100%}
+.rview{overflow:hidden;height:100%}
+.rtrack{display:flex;height:100%}
+.rcol{flex:0 0 auto;box-sizing:border-box;padding:0 .7rem}
 .bl.red.win{background:#ff2d45;color:#fff;box-shadow:0 0 .7rem rgba(255,45,69,.75)}
 .bl.blue.win{background:#2f7bff;color:#fff;box-shadow:0 0 .7rem rgba(47,123,255,.75)}
 .bl.win .sd{color:#fff}
@@ -939,14 +947,16 @@ function bar(cls, teams, score, win){
 function matchCard(m, mode){   /* mode: 'scored' | 'field' | 'queue' | 'first' (first queuing card flashes like police lights) */
   const sc = !!m.scored, rw = sc && m.rs>m.bs, bw = sc && m.bs>m.rs;
   const cls = mode==='first' ? ' queuing police' : mode==='queue' ? ' queuing' : '';
-  return '<div class="card'+cls+'"><div class="row1"><span class="qbadge num">Q '+m.num+'</span>'+((!sc && m.field)?'<span class="field">Field: '+esc(m.field)+'</span>':'')+'</div>'+
+  return '<div class="card'+cls+'"><div class="row1"><span class="qbadge num">Q '+m.num+'</span>'+((!sc && m.field)?'<span class="field">'+(/^field/i.test(m.field) ? '' : 'Field: ')+esc(m.field)+'</span>':'')+'</div>'+
     bar('red', m.red, sc?m.rs:null, rw)+bar('blue', m.blue, sc?m.bs:null, bw)+'</div>';
 }
 function blankCard(){   /* empty card closing each table: no Q number, no teams */
   return '<div class="card blank"><div class="row1"><span class="qbadge" style="visibility:hidden">Q</span></div><div class="bl red"><span class="bt">&nbsp;</span></div><div class="bl blue"><span class="bt">&nbsp;</span></div></div>';
 }
 function matchGroups(div){
-  const d = S[div].data, n = Math.max(1, Math.min(4, +(cfg[div] && cfg[div].fields) || 2));   /* number of fields */
+  const d = S[div].data;
+  let n = Math.max(1, Math.min(4, +(cfg[div] && cfg[div].fields) || 2));   /* number of fields */
+  if (d && d.demo && d.fields) n = Math.max(1, Math.min(4, +d.fields));     /* the demo brings its own field count */
   if (!d) return {n:n, scored:[], onField:[], queuing:[]};
   const upcoming = d.matches.filter(m=>!m.scored);
   return {n:n, scored:d.matches.filter(m=>m.scored).slice(-2).reverse(), onField:upcoming.slice(0,n), queuing:upcoming.slice(n,2*n)};
@@ -990,21 +1000,45 @@ function rankCols(div){
 }
 function renderRanks(div){
   if (!visible(div)) return;
-  const d = S[div].data, wrap = document.getElementById('rw-'+div), pi = document.getElementById('pi-'+div);
-  if (!d || !d.rankings.length){ wrap.innerHTML='<div class="empty">'+(d? 'No rankings published yet':'Waiting for data…')+'</div>'; pi.textContent=''; return; }
+  const s = S[div], d = s.data, wrap = document.getElementById('rw-'+div), pi = document.getElementById('pi-'+div);
+  if (!d || !d.rankings.length){ wrap.innerHTML='<div class="empty">'+(d? 'No rankings published yet':'Waiting for data…')+'</div>'; pi.textContent=''; wrap._sig=''; return; }
   const qt = new Set(); matchGroups(div).queuing.forEach(m=>m.red.concat(m.blue).forEach(t=>qt.add(t)));   /* teams at the queuing tables */
-  const K = rankCols(div), size = pageSize(div), per = size*K;
-  const pages = Math.max(1, Math.ceil(d.rankings.length/per)), p = page % pages;
-  const rows = d.rankings.slice(p*per, p*per+per);
-  pi.textContent = 'PAGE '+(p+1)+' / '+pages;
+  const K = rankCols(div), size = pageSize(div);
   const table = rs => '<table><thead><tr><th>#</th><th>TEAM</th><th>W-L-T</th><th>WP</th><th>AP</th><th>SP</th><th>AVG</th></tr></thead><tbody>'+
     rs.map(r=>'<tr class="'+(qt.has(r.team)?'qteam ':'')+'num"><td class="rk">'+r.rank+'</td><td><span class="tn">'+esc(r.team)+'</span></td><td>'+r.w+'-'+r.l+'-'+r.t+'</td><td>'+r.wp+'</td><td>'+r.ap+'</td><td>'+r.sp+'</td><td class="avg">'+(+r.avg).toFixed(1)+'</td></tr>').join('')+
     '</tbody></table>';
-  let h = '<div class="rcols" style="grid-template-columns:repeat('+K+',minmax(0,1fr))">';
-  for (let k=0; k<K; k++){ const part = rows.slice(k*size, (k+1)*size); h += '<div>'+(part.length ? table(part) : '')+'</div>'; }
-  wrap.innerHTML = h + '</div>';
+  if (isDouble()){                                     /* half-screen: one column, flips page by page */
+    const pages = Math.max(1, Math.ceil(d.rankings.length/size)), p = page % pages;
+    pi.textContent = 'PAGE '+(p+1)+' / '+pages;
+    wrap.innerHTML = '<div class="rcols" style="grid-template-columns:minmax(0,1fr)"><div>'+table(d.rankings.slice(p*size, p*size+size))+'</div></div>';
+    wrap._sig = '';
+    return;
+  }
+  /* full screen: K columns side by side. When there are more columns than fit, the whole strip slides left one
+     column per step and the column that leaves on the left comes back in on the right (see advanceRanks). */
+  const C = Math.max(1, Math.ceil(d.rankings.length/size));
+  const cols = []; for (let c=0; c<C; c++) cols.push(table(d.rankings.slice(c*size, (c+1)*size)));
+  const loop = C > K, track = loop ? cols.concat(cols.slice(0, K)) : cols, L = track.length;   /* first K columns repeated at the end */
+  pi.textContent = '';
+  const inner = track.map(h=>'<div class="rcol" style="width:'+(100/L)+'%">'+h+'</div>').join('');
+  const sig = K+'|'+size+'|'+(loop?C:0)+'|'+inner;
+  if (wrap._sig === sig) return;                       /* nothing changed: leave the running animation alone */
+  wrap._sig = sig;
+  const pos = loop ? (s.rpos||0) % C : 0;
+  wrap.innerHTML = '<div class="rview"><div class="rtrack" data-c="'+(loop?C:0)+'" style="width:'+(L*100/K)+'%;transform:translateX(-'+(pos*100/L)+'%)">'+inner+'</div></div>';
 }
-
+function advanceRanks(div){
+  const s = S[div]; if (!s.data || !visible(div)) return;
+  const tr = document.getElementById('rw-'+div).querySelector('.rtrack');
+  const C = tr ? +tr.dataset.c : 0; if (!C) return;    /* everything fits: nothing to scroll */
+  const L = C + rankCols(div);
+  s.rpos = ((s.rpos||0) + 1);
+  tr.style.transition = 'transform .9s ease-in-out';
+  tr.style.transform = 'translateX(-'+(s.rpos*100/L)+'%)';
+  if (s.rpos >= C){                                     /* now showing the repeated columns: jump back to the start unseen */
+    setTimeout(function(){ tr.style.transition = 'none'; tr.style.transform = 'translateX(0)'; s.rpos = 0; }, 1000);
+  }
+}
 function renderHeader(div){
   const d = S[div].data, ph = (d && d.phase) || 'quals';
   const lbl = isDouble() ? '<span class="div">'+div.toUpperCase()+'</span> ' : '';
@@ -1120,7 +1154,7 @@ async function syncControl(){
     else if (c.seq !== lastSeq){
       lastSeq = c.seq;
       if (c.cmd==='refresh' || c.cmd==='restartdemo') pollAll();
-      else if (c.cmd==='nextpage'){ page++; countdown = cfg.scroll; renderAll(); }
+      else if (c.cmd==='nextpage'){ page++; countdown = cfg.scroll; ['hs','ms'].forEach(d => isDouble() ? renderRanks(d) : advanceRanks(d)); }
       else if (c.cmd==='reload') location.reload();
       else if (c.cmd==='clearcache') clearEverything();
     }
@@ -1139,7 +1173,7 @@ async function clearEverything(){
 /* ---------- 1s tick: page cycling ---------- */
 setInterval(function(){
   countdown--;
-  if (countdown <= 0){ page++; countdown = cfg.scroll; ['hs','ms'].forEach(renderRanks); }
+  if (countdown <= 0){ page++; countdown = cfg.scroll; ['hs','ms'].forEach(d => isDouble() ? renderRanks(d) : advanceRanks(d)); }
 }, 1000);
 window.addEventListener('resize', ()=>['hs','ms'].forEach(renderRanks));
 window.addEventListener('online', pollAll);
