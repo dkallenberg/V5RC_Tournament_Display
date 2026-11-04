@@ -31,7 +31,6 @@ DEFAULT_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJhdWQiOiIzIiwianRpIjoiNz
 
 DEFAULT_CONFIG = {
     "view": "single",  # single = one tournament full screen (HS settings) | double = HS left + MS right
-    "hideBar": False,  # True = never show the bottom status bar (otherwise it hides itself after 10 minutes)
     "hs": {"sku": "", "demo": False, "phase": "auto", "fields": 2, "division": ""},
     "ms": {"sku": "", "demo": False, "phase": "auto", "fields": 2, "division": ""},
     "rankWait": 300,   # seconds to wait after the last qual is scored before showing rankings only
@@ -45,10 +44,8 @@ DEFAULT_CONFIG = {
 CFG_LOCK = threading.Lock()
 CONFIG = json.loads(json.dumps(DEFAULT_CONFIG))
 COMMAND = {"seq": 0, "cmd": ""}
-BAR_SECONDS = 600
 SERVER_START = time.time()
 DEMO_START = {"hs": SERVER_START, "ms": SERVER_START}   # when each division's demo timeline began
-BAR_UNTIL = time.time() + BAR_SECONDS      # bottom status bar shows until this time (10 min after start)
 CACHE = {}          # division -> {"t": ts, "data": normalized}
 LAST_GOOD = {}      # division -> normalized data from last successful fetch
 STATE_PATH = os.path.join(HERE, "kiosk_state.json")
@@ -98,7 +95,6 @@ def sanitize_config(c):
     out["scroll"] = clamp(c.get("scroll"), 3, 120, 8)
     v = str(c.get("view", "single"))
     out["view"] = "double" if v in ("double", "both") else "single"
-    out["hideBar"] = bool(c.get("hideBar", False))
     base = str(c.get("apiBase") or API_BASE_DEFAULT).strip().rstrip("/")
     out["apiBase"] = base if base.startswith("http") else API_BASE_DEFAULT
     out["token"] = str(c.get("token") or DEFAULT_TOKEN).strip()
@@ -701,8 +697,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ip": local_ip(), "port": self.server.server_address[1], "time": int(time.time())})
             elif path == "/api/command":
                 with CFG_LOCK:
-                    self._json({"seq": COMMAND["seq"], "cmd": COMMAND["cmd"], "rev": CONFIG["rev"],
-                                "barLeft": max(0, int(BAR_UNTIL - time.time()))})
+                    self._json({"seq": COMMAND["seq"], "cmd": COMMAND["cmd"], "rev": CONFIG["rev"]})
             elif path in ("/api/data/hs", "/api/data/ms"):
                 self._json(get_division(path[-2:]))
             elif path in ("/api/test/hs", "/api/test/ms"):
@@ -732,13 +727,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(public_config(save_config(self._body())))
             elif path == "/api/command":
                 cmd = str(self._body().get("cmd", ""))
-                if cmd not in ("refresh", "nextpage", "reload", "clearcache", "showbar", "restartdemo"):
+                if cmd not in ("refresh", "nextpage", "reload", "clearcache", "restartdemo"):
                     return self._json({"error": "unknown command"}, 400)
-                global BAR_UNTIL
                 with CFG_LOCK:
-                    if cmd == "showbar":
-                        BAR_UNTIL = time.time() + BAR_SECONDS
-                    elif cmd == "restartdemo":
+                    if cmd == "restartdemo":
                         for dv in DEMO_START:
                             DEMO_START[dv] = time.time()
                     COMMAND["seq"] += 1
@@ -776,7 +768,7 @@ html{font-size:calc(.5vw + .5vh);height:100%;background:var(--bg);overflow:hidde
 body{height:100%;background:var(--bg);color:var(--text);font-family:"Barlow Condensed","Roboto Condensed","DejaVu Sans Condensed","Liberation Sans Narrow",Arial,sans-serif;
   display:flex;flex-direction:column;cursor:none;user-select:none}
 .num{font-variant-numeric:tabular-nums}
-#panes{flex:1;min-height:0;display:grid;grid-template-columns:1fr 1fr;gap:.9rem;padding:.9rem .9rem .5rem}
+#panes{flex:1;min-height:0;display:grid;grid-template-columns:1fr 1fr;gap:.9rem;padding:.9rem}
 .pane{min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--panel);border:.14rem solid var(--line);border-radius:.8rem;overflow:hidden}
 .phead{display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:.7rem 1.2rem;background:var(--panel2);border-bottom:.14rem solid var(--line)}
 .badge{font-weight:800;font-size:2.1rem;letter-spacing:.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -785,7 +777,7 @@ body{height:100%;background:var(--bg);color:var(--text);font-family:"Barlow Cond
 .dot{width:1.2rem;height:1.2rem;border-radius:50%;background:var(--green);box-shadow:0 0 .8rem var(--green)}
 .dot.warn{background:var(--amber);box-shadow:0 0 .8rem var(--amber)}
 .dot.off{background:var(--red);box-shadow:0 0 .8rem var(--red)}
-.pbody{flex:1;min-height:0;display:grid;grid-template-columns:56% 44%}   /* rankings left, matches right */
+.pbody{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,56fr) minmax(0,44fr)}   /* rankings left, matches right */
 .matches{display:flex;flex-direction:column;min-height:0;border-left:.14rem solid var(--line);padding:.7rem .8rem;gap:.6rem}
 .sec-title{font-weight:800;font-size:1.45rem;color:var(--dim);letter-spacing:.08em;padding:0 .2rem .3rem}
 .sec{display:flex;flex-direction:column;gap:.45rem;min-height:0}
@@ -818,12 +810,13 @@ th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}
 td:nth-child(2){font-weight:800}
 td.rk{color:var(--gold);font-weight:800}
 td:nth-child(2){color:#fff}
-tr.qteam td{background:rgba(255,200,61,.14)}
-tr.qteam td:nth-child(2){background:var(--gold);color:#1a1300;border-radius:.35rem}   /* teams headed to the queuing tables */
+.tn{display:inline-block;padding:0 .5rem;margin-left:-.5rem}
+tr.qteam .tn{background:var(--gold);color:#1a1300;border-radius:.35rem}   /* only the team number, for teams headed to the queuing tables */
 td.avg{color:var(--green)}
 .sec.last{margin-bottom:.2rem}
-.queue-title{color:var(--gold)}
-.card.queuing{border-color:var(--gold);background:#2a2208;box-shadow:inset 0 0 0 .1rem var(--gold),0 0 1rem rgba(255,200,61,.35)}
+.queue-sec{background:var(--gold);border-radius:.7rem;padding:.35rem .5rem}
+.queue-title{color:#1a1300}
+.card.queuing{border-color:#1a1300}
 /* the first NOW QUEUING card flashes red/blue like police lights; the team numbers and bars stay steady */
 .card.police{animation:police .8s linear infinite}
 @keyframes police{
@@ -839,6 +832,12 @@ td.avg{color:var(--green)}
 .card .bl{font-size:1.35rem;line-height:1.15;padding:.05rem .6rem}
 .card .bl.win{margin:0 -.7rem;padding:.05rem 1.3rem}   /* winner's block runs the full width of the card */
 .card.blank .bl{opacity:.3}
+/* single (full screen): rankings use the left 3/4 as several columns, matches keep the right 1/4 */
+#panes.single .pane:not(.ph-bracket):not(.ph-rankings) .pbody{grid-template-columns:minmax(0,3fr) minmax(0,1fr)}
+#panes.single .pane{--rowh:3.5}
+#panes.single td{font-size:1.4rem;padding:0 .25rem}
+#panes.single th{font-size:1.05rem;padding:.3rem .25rem}
+.rcols{display:grid;gap:1.4rem;height:100%}
 .bl.red.win{background:#ff2d45;color:#fff;box-shadow:0 0 .7rem rgba(255,45,69,.75)}
 .bl.blue.win{background:#2f7bff;color:#fff;box-shadow:0 0 .7rem rgba(47,123,255,.75)}
 .bl.win .sd{color:#fff}
@@ -883,11 +882,6 @@ td.avg{color:var(--green)}
 .bm .bl.win{margin:0 -.35rem;padding:0 .65rem}   /* winner's block runs the full width of the card */
 .bl .bt{display:flex;gap:.9rem}                   /* team numbers a bit further apart */
 .bcell.fin .bm{flex:0 1 auto;max-height:none;padding:.35rem .45rem}
-#foot{flex:0 0 auto;display:none;justify-content:space-between;align-items:center;gap:1.5rem;padding:.55rem 1.4rem;background:#070a0f;border-top:.14rem solid var(--line);font-size:1.3rem;font-weight:700;color:var(--dim);white-space:nowrap}
-#foot b{color:var(--text)}
-#foot .ok{color:var(--green)}
-#foot .bad{color:var(--red)}
-#foot.on{display:flex}
 #gear{position:fixed;top:.4rem;right:.5rem;width:2.4rem;height:2.4rem;color:var(--dim);opacity:.12;cursor:pointer;z-index:10;transition:opacity .2s}
 #gear:hover{opacity:1}
 #gear svg{width:100%;height:100%}
@@ -899,13 +893,6 @@ td.avg{color:var(--green)}
   <section class="pane" id="pane-hs"></section>
   <section class="pane" id="pane-ms"></section>
 </div>
-<div id="foot">
-  <span id="f-sys">PI SYSTEM STATUS: <span class="ok">ACTIVE</span> (IP: <b id="f-ip">--</b>)</span>
-  <span>DATA INGEST: <b>EVENTS.VEX.COM</b></span>
-  <span>POLLING EVERY <b id="f-poll">15</b>s</span>
-  <span>NEXT PAGE IN <b id="f-next" class="num">8</b>s</span>
-</div>
-
 <script>
 /* ---------- tiny Lucide-style inline icons ---------- */
 const ICONS = {
@@ -916,7 +903,7 @@ document.getElementById('gear').innerHTML = icon('settings');
 
 /* ---------- config (server is source of truth; localStorage is the offline mirror) ---------- */
 const LS_KEY = 'vexKioskCfg';
-const DEFAULT_CFG = {view:'single',hideBar:false,hs:{sku:'',demo:false,fields:2},ms:{sku:'',demo:false,fields:2},poll:15,scroll:8,rev:0};
+const DEFAULT_CFG = {view:'single',hs:{sku:'',demo:false,fields:2},ms:{sku:'',demo:false,fields:2},poll:15,scroll:8,rev:0};
 let cfg = (function(){ try { return Object.assign({}, DEFAULT_CFG, JSON.parse(localStorage.getItem(LS_KEY)||'{}')); } catch(e){ return Object.assign({}, DEFAULT_CFG); } })();
 function saveLocal(){ try { localStorage.setItem(LS_KEY, JSON.stringify(cfg)); } catch(e){} }
 
@@ -934,7 +921,7 @@ function buildPane(div){
       '<div class="matches">'+
         '<div class="sec last"><div id="last-'+div+'" class="sec"></div></div>'+
         '<div class="sec next"><div class="sec-title">ON FIELD NOW</div><div id="next-'+div+'" class="sec next" style="flex:1"></div></div>'+
-        '<div class="sec next"><div class="sec-title queue-title">NOW QUEUING</div><div id="queue-'+div+'" class="sec next" style="flex:1"></div></div>'+
+        '<div class="sec next queue-sec"><div class="sec-title queue-title">NOW QUEUING</div><div id="queue-'+div+'" class="sec next" style="flex:1"></div></div>'+
       '</div>'+
       '<div class="bracket" id="bk-'+div+'"></div>'+
     '</div>'+
@@ -988,7 +975,7 @@ function renderMatches(div){
   const last = document.getElementById('last-'+div), nxt = document.getElementById('next-'+div), que = document.getElementById('queue-'+div);
   if (!d){ last.innerHTML = '<div class="empty">Waiting for data…</div>'; nxt.innerHTML=''; que.innerHTML=''; return; }
   const g = matchGroups(div);
-  last.closest('.matches').classList.toggle('dense', g.n >= 3);
+  last.closest('.matches').classList.toggle('dense', g.n >= 4);   /* only 4 fields get the compact size */
   last.innerHTML = g.scored.length ? g.scored.map(m=>matchCard(m,'scored')).join('') : '<div class="empty">No matches scored yet</div>';
   /* one slot per field in each table; a slot with no match left stays an empty card (no Q number, no teams) */
   const fill = (arr, mk) => arr.map(mk).join('') + new Array(Math.max(0, g.n - arr.length)).fill(blankCard()).join('');
@@ -1011,7 +998,7 @@ function renderRanks(div){
   const rows = d.rankings.slice(p*per, p*per+per);
   pi.textContent = 'PAGE '+(p+1)+' / '+pages;
   const table = rs => '<table><thead><tr><th>#</th><th>TEAM</th><th>W-L-T</th><th>WP</th><th>AP</th><th>SP</th><th>AVG</th></tr></thead><tbody>'+
-    rs.map(r=>'<tr class="'+(qt.has(r.team)?'qteam ':'')+'num"><td class="rk">'+r.rank+'</td><td>'+esc(r.team)+'</td><td>'+r.w+'-'+r.l+'-'+r.t+'</td><td>'+r.wp+'</td><td>'+r.ap+'</td><td>'+r.sp+'</td><td class="avg">'+(+r.avg).toFixed(1)+'</td></tr>').join('')+
+    rs.map(r=>'<tr class="'+(qt.has(r.team)?'qteam ':'')+'num"><td class="rk">'+r.rank+'</td><td><span class="tn">'+esc(r.team)+'</span></td><td>'+r.w+'-'+r.l+'-'+r.t+'</td><td>'+r.wp+'</td><td>'+r.ap+'</td><td>'+r.sp+'</td><td class="avg">'+(+r.avg).toFixed(1)+'</td></tr>').join('')+
     '</tbody></table>';
   let h = '<div class="rcols" style="grid-template-columns:repeat('+K+',minmax(0,1fr))">';
   for (let k=0; k<K; k++){ const part = rows.slice(k*size, (k+1)*size); h += '<div>'+(part.length ? table(part) : '')+'</div>'; }
@@ -1038,12 +1025,6 @@ function renderMsg(div){
 }
 function isDouble(){ return (cfg.view || 'single') === 'double'; }
 function visible(div){ return isDouble() || div === 'hs'; }   /* single mode shows the HS tournament only */
-function setBar(on){
-  const f = document.getElementById('foot');
-  if (f.classList.contains('on') === on) return;
-  f.classList.toggle('on', on);
-  requestAnimationFrame(()=>['hs','ms'].forEach(renderRanks));   /* panes grow/shrink, re-fit the rank pages */
-}
 function applyView(){
   const pn = document.getElementById('panes');
   ['hs','ms'].forEach(d=>{ document.getElementById('pane-'+d).style.display = visible(d) ? '' : 'none'; });
@@ -1051,13 +1032,7 @@ function applyView(){
   pn.classList.toggle('single', !isDouble());
 }
 function renderDiv(d){ if (!visible(d)) return; applyPhase(d); renderHeader(d); renderMsg(d); renderMatches(d); renderBracket(d); renderRanks(d); }
-function renderAll(){ applyView(); ['hs','ms'].forEach(renderDiv); renderFoot(); }
-
-function renderFoot(){
-  document.getElementById('f-ip').textContent = ip;
-  document.getElementById('f-poll').textContent = cfg.poll;
-  document.getElementById('f-next').textContent = countdown;
-}
+function renderAll(){ applyView(); ['hs','ms'].forEach(renderDiv); }
 
 /* ---------- phases: qualification view -> rankings only -> single-elimination bracket ---------- */
 function applyPhase(div){
@@ -1153,7 +1128,6 @@ async function syncControl(){
       const nc = await fetchJson('/api/config', 4000);
       cfg = nc; saveLocal(); countdown = Math.min(countdown, cfg.scroll); pollAll(); renderAll();
     }
-    setBar(!cfg.hideBar && c.barLeft > 0);      /* status bar: hidden by setting, or after 10 minutes */
   } catch(e){ /* server unreachable: keep running on cached cfg + data */ }
 }
 async function clearEverything(){
@@ -1166,14 +1140,13 @@ async function clearEverything(){
 setInterval(function(){
   countdown--;
   if (countdown <= 0){ page++; countdown = cfg.scroll; ['hs','ms'].forEach(renderRanks); }
-  document.getElementById('f-next').textContent = Math.max(countdown,0);
 }, 1000);
 window.addEventListener('resize', ()=>['hs','ms'].forEach(renderRanks));
 window.addEventListener('online', pollAll);
 
 /* ---------- boot ---------- */
 (async function(){
-  buildPane('hs'); buildPane('ms'); renderAll(); setBar(!cfg.hideBar);
+  buildPane('hs'); buildPane('ms'); renderAll();
   try { const si = await fetchJson('/api/sysinfo', 4000); ip = si.ip; } catch(e){}
   try { cfg = await fetchJson('/api/config', 4000); saveLocal(); } catch(e){}
   countdown = cfg.scroll; renderAll(); pollAll();
@@ -1233,7 +1206,6 @@ ADMIN_HTML = r"""<!DOCTYPE html>
     <h2 class="font-bold text-lg">Tournaments shown on the kiosk</h2>
     <select id="view"><option value="single">1. Single tournament (FULL SCREEN)</option><option value="double">2. Double tournament: HS (left) and MS (right)</option></select>
     <p class="text-xs" style="color:#8da2ba">Single uses the High School settings below and locks the Middle School settings. Only the tournament(s) shown are polled from events.vex.com.</p>
-    <label class="flex items-center gap-2 pt-2" style="color:#eef3f9"><input type="checkbox" id="hideBar"> Hide the bottom status bar from the start (otherwise it disappears 10 minutes after the display starts)</label>
     <p class="text-xs" style="color:#8da2ba">Demo mode plays a whole event: one qualification match every 3 seconds, 15 seconds on the final rankings (alliance selection), the bracket for 5 seconds, then one bracket match every 3 seconds, then it starts over.</p>
   </section>
 
@@ -1279,7 +1251,6 @@ ADMIN_HTML = r"""<!DOCTYPE html>
       <button class="btn" data-cmd="refresh"><span data-i="refresh"></span>Force data refresh</button>
       <button class="btn" data-cmd="nextpage"><span data-i="next"></span>Cycle rank page</button>
       <button class="btn" data-cmd="restartdemo"><span data-i="refresh"></span>Restart demo</button>
-      <button class="btn" data-cmd="showbar"><span data-i="monitor"></span>Show status bar for 10 min</button>
       <button class="btn" data-cmd="reload"><span data-i="refresh"></span>Reload kiosk page</button>
       <button class="btn danger" data-cmd="clearcache"><span data-i="trash"></span>Clear kiosk browser cache</button>
     </div>
@@ -1318,7 +1289,7 @@ function fill(){
   $('ms-sku').value = cfg.ms.sku; $('ms-demo').checked = !!cfg.ms.demo; $('ms-div').value = cfg.ms.division || ''; $('ms-phase').value = cfg.ms.phase || 'auto'; $('ms-fields').value = cfg.ms.fields || 2;
   $('rankWait').value = cfg.rankWait == null ? 300 : cfg.rankWait;
   $('poll').value = cfg.poll; $('scroll').value = cfg.scroll;
-  $('view').value = cfg.view === 'double' ? 'double' : 'single'; $('hideBar').checked = !!cfg.hideBar; applyLock(); $('apiBase').value = cfg.apiBase || ''; $('token').value = '';
+  $('view').value = cfg.view === 'double' ? 'double' : 'single'; applyLock(); $('apiBase').value = cfg.apiBase || ''; $('token').value = '';
   $('token-hint').textContent = cfg.tokenSet ? ('A token is saved (ends ' + cfg.tokenHint + ')' + (cfg.tokenExpired ? ', EXPIRED' : cfg.tokenExp ? ', valid until ' + cfg.tokenExp : '') + '. Paste a new one here only to replace it.') : 'No token saved yet.';
 }
 function read(){
@@ -1326,7 +1297,7 @@ function read(){
     hs:{sku:$('hs-sku').value.trim(), demo:$('hs-demo').checked, phase:$('hs-phase').value, division:$('hs-div').value.trim(), fields:+$('hs-fields').value||2},
     ms:{sku:$('ms-sku').value.trim(), demo:$('ms-demo').checked, phase:$('ms-phase').value, division:$('ms-div').value.trim(), fields:+$('ms-fields').value||2},
     rankWait: $('rankWait').value === '' ? 300 : +$('rankWait').value,
-    poll:+$('poll').value||15, scroll:+$('scroll').value||8, view:$('view').value, hideBar:$('hideBar').checked, apiBase:$('apiBase').value.trim(), token:$('token').value.trim(), rev:cfg?cfg.rev:1
+    poll:+$('poll').value||15, scroll:+$('scroll').value||8, view:$('view').value, apiBase:$('apiBase').value.trim(), token:$('token').value.trim(), rev:cfg?cfg.rev:1
   };
 }
 async function load(){
